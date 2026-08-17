@@ -1,10 +1,12 @@
-"""请求/入库集合采样（对齐 PAKTON：只索引“被采样请求引用的文档”）。
+"""请求/入库集合采样（LegalBenchRAG 对齐 PAKTON 的"请求数封顶 194 + 等权聚合"口径）。
 
-- LegalBenchRAG：把 total 条请求按 4 个 benchmark 的“原任务比例”（各基准 query 数占
+- LegalBenchRAG：把 total 条请求按 4 个 benchmark 的"原任务比例"（各基准 query 数占
   全体比例）分配；若 weight="equal" 则按 PAKTON 的等权 0.25 分配（每条基准均分）。
-  入库文档 = 被采到请求引用的 gold 文档集（PAKTON 做法，非全量）＋每个 benchmark 单独会话。
-- ContractNLI：按“原标签比例”（entailment/contradiction/neutral 在原始子集中的分布）
-  分层抽样 total 条；入库合同 = 被采到实例对应的 distinct 合同（nli:{premise_id}）。
+  doc_ids 仅记录"被采到请求引用的文档"（供 --ingest-only-referenced 调试）；
+  默认入库仍为每基准全量语料（PAKTON 默认 SORT_BY_DOCUMENT=False 即整库入库）。
+- ContractNLI：按"原标签比例"（entailment/contradiction/neutral 在原始子集中的分布）
+  分层抽样 total 条；入库合同 = 被采到实例对应的 distinct 合同（nli:{premise_id}），
+  与 PAKTON"每条先索引该合同再问"一致。
 
 全部用稳定 seed 可复现；输出可直接交给 main.py 的 --request-set 消费。
 """

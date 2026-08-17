@@ -68,6 +68,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="ContractNLI 会话为空时允许自动入库 distinct 合同（默认禁止）")
     p.add_argument("--request-set", default=None,
                    help="预先生成的请求/入库集合 JSON（sampling 模块产物）；只跑其中列出的请求")
+    p.add_argument("--ingest-only-referenced", action="store_true",
+                   help="LegalBenchRAG 入库仅限 request-set 引用的文档（调试用）；"
+                        "默认入库每基准全量语料以对齐 PAKTON")
     p.add_argument("--seed", type=int, default=None, help="抽样种子")
     p.add_argument("--session", default=None,
                    help="覆盖所有 benchmark 的数据库会话（单 benchmark 调试用）")
@@ -204,9 +207,9 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
     for name in names:
         session = args.session or sessions_cfg.get(name, f"lb-{name}")
         print(f"\n=== [legalbenchrag] benchmark={name} session={session} ===")
-        file_list = request_docs.get(name) if request_set else None
+        file_list = request_docs.get(name) if (request_set and args.ingest_only_referenced) else None
         if file_list:
-            print(f"  [ingest] 仅入库被采样请求引用的 {len(file_list)} 个文档（PAKTON 对齐）")
+            print(f"  [ingest] 仅入库被采样请求引用的 {len(file_list)} 个文档（调试用；默认全量入库以对齐 PAKTON）")
         if _session_doc_count(session) == 0:
             if args.no_ingest:
                 print(f"  [错误] session {session} 无文档且禁用了自动入库；"

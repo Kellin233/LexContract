@@ -214,7 +214,8 @@ def ingest_corpus_dir(
     """把 corpus/<benchmark>/*.txt 原样入库并分配到会话。
 
     root: LegalBenchRAG 根目录（含 corpus/）。benchmark: contractnli|cuad|maud|privacy_qa。
-    file_list: 只入库这些 corpus 相对路径（如 ["cuad/xxx.txt"]）——PAKTON 对齐时只入被引用文档。
+    file_list: 只入库这些 corpus 相对路径（如 ["cuad/xxx.txt"]）——用于 --ingest-only-referenced
+    调试；默认全量入库（PAKTON 默认 SORT_BY_DOCUMENT=False 即整库入库）。
     返回统计 {docs, chunks, elapsed_s, skipped}。
     """
     from src.document.embedder import embed_texts
