@@ -1,0 +1,18 @@
+# --- 文档解析 + 向量入库模块 (document/) ---
+# 核心解析
+docling>=2.4
+
+# 本地多语 embedding（含 torch）
+sentence-transformers>=4.1.0
+
+# PostgreSQL + pgvector
+psycopg[binary]>=3.2
+pgvector>=0.3.6
+
+# 工具
+python-dotenv>=1.0
+pydantic>=2.7
+
+# --- 开发 / 验证依赖（生成示例文档用，可注释掉） ---
+python-docx>=1.1
+reportlab>=4.0

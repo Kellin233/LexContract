@@ -1,0 +1,418 @@
+"""
+LexContract — 合同证据链编排器（改造自 deep-research M1 Orchestrator）
+
+状态机流程：
+  IDLE → PLANNING(ContractPlanner.initial_plan)
+       → DISPATCHING(EvidenceWorker 并行，沿用 DAG 分层 + Semaphore + 超时)
+       → COLLECTING(EvidenceAssembly → CitationVerifier → EvidenceStore → 写入 ResearchState)
+       → REVIEWING(Reviewer：覆盖度/冲突/缺口)
+            ├─ SUFFICIENT → REFINING(Refiner → Final Answer)
+            ├─ NEED_MORE 且 iteration < max_iterations 且 有有效新增
+            │      → INCREMENTAL_PLANNING → DISPATCHING
+            └─ 否则（达上限 / 无有效新增）→ REFINING（状态记为 PARTIALLY_SUFFICIENT）
+       → DONE / FAILED
+
+原 deep-research 的 SYNTHESIZING / ADVERSARIAL / REPLANNING 状态不在合同流中使用。
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any, Callable
+
+from .schemas import (
+    OrchestratorState,
+    SubTask,
+    AgentResult,
+    AgentStatus,
+    ResearchReport,
+    RunConfig,
+    TaskType,
+)
+from .agent_pool import AgentPool
+from ..planner.dag import DAG
+from ..contract.schemas import (
+    ResearchState,
+    WorkerResult,
+    FinalStatus,
+    ReviewStatus,
+    ReviewResult,
+    QuestionStatus,
+)
+from ..contract.store import EvidenceStore
+from ..contract.planner import ContractPlanner
+from ..contract.reviewer import Reviewer
+from ..contract.refiner import Refiner
+from ..utils.tracing import trace_chain
+
+SharedMemoryStore = Any  # M4（可选保留，仅落最终报告）
+
+
+__all__ = ["Orchestrator"]
+
+
+class Orchestrator:
+    """合同证据链编排器。
+
+    Attributes:
+        planner: ContractPlanner（initial + incremental）。
+        agent_pool: 对象池，EVIDENCE 任务返回 EvidenceWorker。
+        reviewer / refiner: 完整性与结论模块。
+        evidence_store: 运行期证据库（每次 run 重置）。
+        compressor: 可选，仅用于压缩规划/审查历史，绝不压缩 Evidence。
+        memory_store: 可选 M4，仅用于持久化最终报告。
+    """
+
+    def __init__(
+        self,
+        planner: ContractPlanner,
+        agent_pool: AgentPool,
+        reviewer: Reviewer | None = None,
+        refiner: Refiner | None = None,
+        evidence_store: EvidenceStore | None = None,
+        compressor: Any | None = None,
+        memory_store: Any | None = None,
+    ) -> None:
+        self.planner = planner
+        self.agent_pool = agent_pool
+        self.reviewer = reviewer
+        self.refiner = refiner
+        self.compressor = compressor
+        self.memory_store = memory_store
+
+        # 运行期状态
+        self._runtime: dict[str, Any] = {}
+        self._results: list[AgentResult] = []
+        self._dag: DAG | None = None
+        self._task_map: dict[str, SubTask] = {}
+        self._current_state = OrchestratorState.IDLE
+        self._query: str = ""
+        self._config: RunConfig = RunConfig()
+        self._start_time: float = 0.0
+        self._evidence_store = evidence_store or EvidenceStore()
+        self._research_state: ResearchState | None = None
+        self._num_searches = 0
+
+        self._state_handlers: dict[OrchestratorState, Callable[[], asyncio.Future[OrchestratorState]]] = {
+            OrchestratorState.IDLE: self._on_idle,
+            OrchestratorState.PLANNING: self._do_planning,
+            OrchestratorState.DISPATCHING: self._do_dispatching,
+            OrchestratorState.COLLECTING: self._do_collecting,
+            OrchestratorState.REVIEWING: self._do_reviewing,
+            OrchestratorState.INCREMENTAL_PLANNING: self._do_incremental_planning,
+            OrchestratorState.REFINING: self._do_refining,
+            OrchestratorState.DONE: self._on_done,
+            OrchestratorState.FAILED: self._on_failed,
+        }
+
+    # ------------------------------------------------------------------
+    # 公共 API
+    # ------------------------------------------------------------------
+    @trace_chain(name="orchestrator.run", tags=["contract", "orchestrator"])
+    async def run(self, query: str, config: RunConfig | None = None) -> ResearchReport:
+        self._query = query
+        self._config = config or RunConfig()
+        self._start_time = time.monotonic()
+        self._runtime.clear()
+        self._results.clear()
+        self._dag = None
+        self._task_map.clear()
+        self._current_state = OrchestratorState.IDLE
+        self._evidence_store = EvidenceStore()  # 每次运行独立证据库
+        self._research_state = None
+        self._num_searches = 0
+
+        while self._current_state not in (OrchestratorState.DONE, OrchestratorState.FAILED):
+            if self._is_global_timeout():
+                if self._current_state in (
+                    OrchestratorState.DISPATCHING,
+                    OrchestratorState.COLLECTING,
+                    OrchestratorState.REVIEWING,
+                    OrchestratorState.INCREMENTAL_PLANNING,
+                ):
+                    print("[Timeout] 全局超时，强制进入 Refiner（使用已有证据）")
+                    self._current_state = OrchestratorState.REFINING
+                else:
+                    self._current_state = OrchestratorState.FAILED
+                break
+
+            handler = self._state_handlers.get(self._current_state)
+            if handler is None:
+                raise RuntimeError(f"Unknown state: {self._current_state}")
+            next_state = await handler()
+            self._current_state = next_state
+            print(f"[Orchestrator] State transition: {self._current_state.value}")
+
+        if self._current_state == OrchestratorState.DONE:
+            report = self._runtime.get("final_report")
+            if report is None:
+                report = ResearchReport(query=query, content="Report generation failed unexpectedly.")
+            report.num_searches = self._num_searches
+            report.num_replan = max(0, (self._research_state.iteration if self._research_state else 1) - 1)
+            if self.memory_store is not None:
+                try:
+                    self._store_final_to_memory(report)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[M4] Failed to store final report: {e}")
+            return report
+
+        return ResearchReport(query=query, content="Research failed due to persistent errors or global timeout.")
+
+    # ------------------------------------------------------------------
+    # 状态机处理器
+    # ------------------------------------------------------------------
+    async def _on_idle(self) -> OrchestratorState:
+        return OrchestratorState.PLANNING
+
+    async def _do_planning(self) -> OrchestratorState:
+        """初始规划：拆解研究问题（不生成任何结论）。"""
+        try:
+            questions = self.planner.initial_plan(self._query)
+        except Exception as e:  # noqa: BLE001
+            print(f"[Planning] Failed: {e}")
+            return OrchestratorState.FAILED
+
+        if not questions:
+            print("[Planning] Planner 未返回任何调查问题")
+            return OrchestratorState.FAILED
+
+        self._research_state = ResearchState(
+            original_question=self._query,
+            iteration=1,
+            session_id=self._config.session_id,
+            doc_ids=list(self._config.doc_ids),
+            questions=questions,
+            active_question_ids=[q.question_id for q in questions],
+        )
+        self._dag, self._task_map = self._build_dag_from_questions(questions)
+        print(f"[Planning] ✓ 初始调查要点 {len(questions)} 个: {[q.question_id for q in questions]}")
+        for q in questions:
+            print(f"[Planning]   {q.question_id}: {q.question}")
+        return OrchestratorState.DISPATCHING
+
+    async def _do_dispatching(self) -> OrchestratorState:
+        """DAG 分层 + Semaphore 并发执行 EvidenceWorker。"""
+        if self._dag is None or len(self._dag) == 0:
+            return OrchestratorState.COLLECTING
+
+        semaphore = asyncio.Semaphore(self._config.max_concurrent)
+        parallel_groups = self._dag.get_parallel_groups()
+        all_results: list[AgentResult] = []
+
+        for layer_idx, group in enumerate(parallel_groups):
+            print(f"[Dispatch] ▶ Layer {layer_idx + 1}/{len(parallel_groups)}: {group} (并行执行)")
+
+            async def _run_one(task_id: str) -> AgentResult:
+                async with semaphore:
+                    subtask = self._task_map.get(task_id)
+                    if subtask is None:
+                        return AgentResult(task_id=task_id, status=AgentStatus.FAILED,
+                                           output=f"SubTask '{task_id}' not found")
+                    context = self._build_task_context(subtask)
+                    agent = await self.agent_pool.get_agent(subtask.task_type)
+                    try:
+                        result = await asyncio.wait_for(
+                            agent.run(subtask, context),
+                            timeout=subtask.timeout_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        result = AgentResult(task_id=task_id, status=AgentStatus.TIMEOUT,
+                                             output=f"Task timed out after {subtask.timeout_seconds}s")
+                    except Exception as e:  # noqa: BLE001
+                        result = AgentResult(task_id=task_id, status=AgentStatus.FAILED,
+                                             output=f"Exception: {type(e).__name__}: {e}")
+                    finally:
+                        await self.agent_pool.release_agent(agent)
+                    return result
+
+            coros = [_run_one(tid) for tid in group]
+            layer_results = await asyncio.gather(*coros, return_exceptions=True)
+            for lr in layer_results:
+                if isinstance(lr, Exception):
+                    all_results.append(AgentResult(task_id="unknown", status=AgentStatus.FAILED,
+                                                   output=f"Dispatch exception: {lr}"))
+                else:
+                    all_results.append(lr)
+
+        self._results = all_results
+        return OrchestratorState.COLLECTING
+
+    async def _do_collecting(self) -> OrchestratorState:
+        """收集 WorkerResult → 更新 ResearchState（证据装配已完成于 Worker 内部，此处记账）。"""
+        state = self._require_state()
+        for r in self._results:
+            if r.status != AgentStatus.SUCCESS:
+                print(f"  [worker-fail] {r.task_id}: {r.status.value} -> {str(r.output)[:300]}")
+                continue
+            wr = r.output
+            if not isinstance(wr, WorkerResult):
+                continue
+            qid = wr.question_id
+            if qid in state.active_question_ids:
+                state.active_question_ids.remove(qid)
+            if qid not in state.completed_question_ids:
+                state.completed_question_ids.append(qid)
+            q = state.get_question(qid)
+            if q is not None:
+                q.status = QuestionStatus.COMPLETED if wr.evidences else QuestionStatus.FAILED
+            if wr.evidences:
+                state.evidence_by_question[qid] = [e.evidence_id for e in wr.evidences]
+            for e in wr.evidences:
+                if e.evidence_id not in state.evidence_ids:
+                    state.evidence_ids.append(e.evidence_id)
+            self._num_searches += len(wr.search_queries)
+
+        success = sum(1 for r in self._results if r.status == AgentStatus.SUCCESS)
+        print(f"[Collect] 本轮子任务完成: {success}/{len(self._results)}；现有证据 {len(self._evidence_store)} 条")
+        return OrchestratorState.REVIEWING
+
+    async def _do_reviewing(self) -> OrchestratorState:
+        """Reviewer：判断证据是否覆盖问题 / 冲突 / 缺口 → 决定继续或收尾。"""
+        state = self._require_state()
+        if self.reviewer is None:
+            state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            return OrchestratorState.REFINING
+
+        previous = state.review_history[-1] if state.review_history else None
+        review = self.reviewer.review(state, self._evidence_store, previous)
+        state.review_history.append(review)
+        state.missing_aspects = review.missing_aspects
+        # 累计冲突（按无序对去重）
+        for c in review.conflicts:
+            key = tuple(sorted([c.evidence_a_id, c.evidence_b_id]))
+            if not any(tuple(sorted([x.evidence_a_id, x.evidence_b_id])) == key for x in state.conflicts):
+                state.conflicts.append(c)
+
+        print(f"[Review] iteration={state.iteration}, status={review.status.value}, "
+              f"missing={len(review.missing_aspects)}, conflicts={len(state.conflicts)}, "
+              f"effective_new={review.effective_new_evidence}")
+
+        if review.status == ReviewStatus.SUFFICIENT:
+            state.final_status = FinalStatus.SUFFICIENT
+            return OrchestratorState.REFINING
+
+        # NEED_MORE：达轮次上限或无有效新增 → 部分足够，收尾
+        if state.iteration >= self._config.max_iterations:
+            state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            return OrchestratorState.REFINING
+        if self._config.stop_on_no_effective_new_evidence and not review.effective_new_evidence:
+            state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            return OrchestratorState.REFINING
+
+        return OrchestratorState.INCREMENTAL_PLANNING
+
+    async def _do_incremental_planning(self) -> OrchestratorState:
+        """增量规划：只补缺失要点，然后继续派发 Worker。"""
+        state = self._require_state()
+        try:
+            new_questions = self.planner.incremental_plan(state)
+        except Exception as e:  # noqa: BLE001
+            print(f"[Incremental] Failed: {e}")
+            state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            return OrchestratorState.REFINING
+
+        state.iteration += 1
+        for q in new_questions:
+            state.questions.append(q)
+            state.active_question_ids.append(q.question_id)
+        self._dag, self._task_map = self._build_dag_from_questions(new_questions)
+        print(f"[Incremental] 新增调查要点 {len(new_questions)} 个 (iteration={state.iteration}): "
+              f"{[q.question_id for q in new_questions]}")
+        return OrchestratorState.DISPATCHING
+
+    async def _do_refining(self) -> OrchestratorState:
+        """Refiner：唯一生成结论的 Agent，产出结构化结果并渲染 Markdown。"""
+        state = self._require_state()
+        if self.refiner is None:
+            self._runtime["final_report"] = ResearchReport(
+                query=self._query,
+                content="Refiner 未配置。",
+                confidence=0.0,
+            )
+            return OrchestratorState.DONE
+
+        try:
+            refiner_result = self.refiner.refine(state, self._evidence_store)
+        except Exception as e:  # noqa: BLE001
+            print(f"[Refiner] Failed: {e}")
+            refiner_result = None
+
+        if refiner_result is None:
+            self._runtime["final_report"] = ResearchReport(
+                query=self._query,
+                content="Refiner 生成失败。",
+                confidence=0.0,
+            )
+            return OrchestratorState.DONE
+
+        confidence = 1.0 if state.final_status == FinalStatus.SUFFICIENT else 0.6
+        report = ResearchReport(
+            query=self._query,
+            content=refiner_result.markdown_body,
+            structured=refiner_result.model_dump(mode="json"),
+            confidence=confidence,
+            num_replan=max(0, state.iteration - 1),
+        )
+        self._runtime["final_report"] = report
+        print(f"[Refiner] ✓ 结论已生成（{state.final_status.value}），{len(refiner_result.citations)} 条引用")
+        return OrchestratorState.DONE
+
+    async def _on_done(self) -> OrchestratorState:
+        return OrchestratorState.DONE
+
+    async def _on_failed(self) -> OrchestratorState:
+        return OrchestratorState.FAILED
+
+    # ------------------------------------------------------------------
+    # 辅助方法
+    # ------------------------------------------------------------------
+    def _require_state(self) -> ResearchState:
+        if self._research_state is None:
+            raise RuntimeError("ResearchState not initialized (run planning first)")
+        return self._research_state
+
+    def _build_dag_from_questions(self, questions) -> tuple[DAG, dict[str, SubTask]]:
+        dag = DAG()
+        task_map: dict[str, SubTask] = {}
+        for idx, q in enumerate(questions):
+            dag.add_node(q.question_id)
+            task_map[q.question_id] = SubTask(
+                task_id=q.question_id,
+                task_type=TaskType.EVIDENCE,
+                description=q.question,
+                dependencies=[],  # 调查要点之间彼此独立，同层并行
+                timeout_seconds=300,
+                priority=1,
+                expected_type="evidence",
+                search_hints=list(q.doc_hints),
+            )
+        dag.topological_sort()  # 触发无环校验
+        return dag, task_map
+
+    def _build_task_context(self, subtask: SubTask) -> dict:
+        return {
+            "query": self._query,
+            "question_id": subtask.task_id,
+            "session_id": self._config.session_id,
+            "doc_ids": list(self._config.doc_ids),
+            "evidence_store": self._evidence_store,
+        }
+
+    def _is_global_timeout(self) -> bool:
+        return time.monotonic() - self._start_time > self._config.global_timeout_seconds
+
+    def _store_final_to_memory(self, report: ResearchReport) -> None:
+        from src.memory.long_term import MemoryEntry
+
+        entry = MemoryEntry(
+            entry_id=f"final_report:{int(time.time())}",
+            claim=str(report.content)[:800],
+            source="orchestrator",
+            confidence=report.confidence,
+            agent_id="orchestrator",
+            timestamp=time.time(),
+            evidence_type="primary",
+            embedding=[],
+            topic=self._query[:50],
+        )
+        self.memory_store.put(entry)

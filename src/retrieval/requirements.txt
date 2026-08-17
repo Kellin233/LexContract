@@ -1,0 +1,16 @@
+# --- 检索模块 (retrieval/) ---
+# 复用 document 模块已有依赖：sentence-transformers(含 torch)、psycopg、pgvector、pydantic、python-dotenv
+
+# 中文/多语分词（BM25 索引与查询对齐用）
+jieba>=0.42,<1
+
+# PostgreSQL + pgvector（向量检索；BM25 依赖数据库内 pg_search 扩展）
+psycopg[binary]>=3.2
+pgvector>=0.3.6
+
+# 本地多语 embedding 与 cross-encoder 重排（复用 document 模块的 bge-m3 / bge-reranker）
+sentence-transformers>=4.1.0
+
+# 工具
+pydantic>=2.7
+python-dotenv>=1.0

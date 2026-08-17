@@ -1,0 +1,37 @@
+# 本地配置（含 API Key / 数据库口令），一律不入库
+.env
+.env.local
+
+# 测试 / 评测代码（不入库）
+tests/
+evaluation/
+
+# 实验 / 评测驱动脚本（面向已移除的 deep-research 流程，不入库）
+scripts/run_ablation.py
+scripts/run_all_experiments.py
+scripts/run_benchmark.py
+scripts/run_eval.py
+scripts/run_evolution.py
+scripts/run_judge.py
+
+# 生成 / 中间产物
+output/
+outputs/
+src/document/output/
+data/
+*.log
+
+# 会话 / 编辑器
+.zcode/
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 模型缓存（若放在项目内）
+.cache/
+models/
