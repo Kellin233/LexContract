@@ -17,6 +17,9 @@ from ..utils.tracing import trace_chain
 
 __all__ = ["Planner", "PlanParseError"]
 
+# 每轮规划最多生成的重点（调查问题）数
+MAX_QUESTIONS_PER_CALL = 3
+
 
 class PlanParseError(Exception):
     pass
@@ -42,7 +45,7 @@ INITIAL_PLAN_PROMPT = """\
 ## 规则
 1. 每个要点只描述“需要调查什么”，例如“查找乙方主动提前终止的通知期限条款”，不要写“乙方可以提前终止/不可以提前终止”这类结论。
 2. 一个问题往往要同时结合多个章节才能回答，因此要点应覆盖所有相关角度（正反情形、例外、交叉引用、后续义务等）。
-3. 生成 3-8 个要点；要点必须与原始问题直接相关。
+3. 每轮最多生成 3 个要点；要点必须与原始问题直接相关，优先覆盖最重要的角度。
 4. 不要生成重复要点。
 5. doc_hints 使用合同原文常见的术语（如“终止”“解除”“单方解除”“提前终止”“不可抗力”“违约责任”“通知期限”）。""" 
 
@@ -79,7 +82,7 @@ INCREMENTAL_PLAN_PROMPT = """\
 1. 只为缺失要点生成问题；与已有问题重复的不要生成。
 2. 每个问题仍只描述“需要调查什么”，不包含结论。
 3. question_id 从 Q{n} 开始连续编号。
-4. 通常 1-4 个即可，不要为了凑数生成无关问题。"""
+4. 每轮最多生成 3 个新的调查问题，不要为了凑数生成无关问题。"""
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -181,9 +184,9 @@ class Planner:
         questions = self._call(prompt, start_seq=next_seq)
         if questions:
             return questions
-        # 降级：把每个缺失要点直接转成调查问题（保证有进展）
+        # 降级：把缺失要点直接转成调查问题（保证有进展）；也受每轮 3 个上限约束
         fallback = []
-        for i, m in enumerate(state.missing_aspects, start=next_seq):
+        for i, m in enumerate(state.missing_aspects[:MAX_QUESTIONS_PER_CALL], start=next_seq):
             fallback.append(ResearchQuestion(
                 question_id=f"Q{i}",
                 question=f"查找与“{m.description}”相关的条款",
@@ -218,4 +221,5 @@ class Planner:
         # 统一从 start_seq 起连续编号，屏蔽 LLM 自编号的跳号/重复
         for i, q in enumerate(questions, start=start_seq):
             q.question_id = f"Q{i}"
-        return questions
+        # 每轮最多 MAX_QUESTIONS_PER_CALL 个，超出部分直接丢弃
+        return questions[:MAX_QUESTIONS_PER_CALL]

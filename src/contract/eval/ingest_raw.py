@@ -8,10 +8,122 @@ LegalBenchRAG 的 gold span 是 corpus 原始 txt 的字符偏移。现有 `_par
 """
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
 from src.document.models import Chunk, ChunkMetadata, ParsedDocument
+
+
+def _heading_level(line: str) -> int | None:
+    """标题层级启发式：复用 document 解析器判定 + 英文法律条款前缀 + 全大写短行。
+
+    返回层级（数字编号=段数；罗马/英文前缀/全大写=浅层），非标题返回 None。
+    只做判定，不做任何文本重排——保证 raw 偏移不变。
+    """
+    from src.document.parser import _heuristic_heading_level
+
+    t = line.strip()
+    if not t:
+        return None
+    lvl = _heuristic_heading_level(line)
+    if lvl is not None:
+        return lvl
+    if len(t) > 80:
+        return None
+    # 英文法律条款前缀：ARTICLE I / Section 4.2 / EXHIBIT A / SCHEDULE 1 ...
+    if re.match(
+        r"^\s*(?:article|section|clause|exhibit|schedule|appendix|annex|attachment|part|title|item|recital)\b",
+        t, re.IGNORECASE,
+    ):
+        return 1
+    # 全大写短行（如 "CERTAIN DEFINITIONS"、"SECURITY AGREEMENT"）
+    letters = [c for c in t if c.isalpha()]
+    if (
+        letters
+        and len(t) <= 60
+        and sum(c.isupper() for c in letters) / len(letters) >= 0.8
+        and not t.rstrip().endswith(".")
+    ):
+        return 1
+    return None
+
+
+def _split_lines_with_offsets(text: str) -> list[tuple[int, int, str]]:
+    """按 \n 切行并给出每行的全局字符偏移 [start, end)。"""
+    lines: list[tuple[int, int, str]] = []
+    pos, n = 0, len(text)
+    while pos < n:
+        nl = text.find("\n", pos)
+        if nl == -1:
+            lines.append((pos, n, text[pos:]))
+            break
+        lines.append((pos, nl, text[pos:nl]))
+        pos = nl + 1
+    return lines
+
+
+def token_budget_chunks(
+    text: str,
+    *,
+    max_tokens: int = 600,
+    min_tokens: int = 50,
+    overlap_tokens: int = 50,
+    detect_headings: bool = True,
+) -> list[dict]:
+    """在 raw 偏移上按 token 预算 + 标题边界切分（对齐正常链路切片策略）。
+
+    与结构切片同理：标题作为章节边界（跨章节不重叠），同章节内容累积到 max_tokens 后
+    落袋并带上 overlap_tokens 的重叠；全部在原始文本偏移上进行，不重排文本。
+    返回 [{start, end, section_path: [标题...], text}]。
+    """
+    from src.document.text_utils import estimate_tokens
+
+    lines = _split_lines_with_offsets(text)
+    chunks: list[dict] = []
+    section_stack: list[str] = []
+    cur: list[tuple[int, int, str]] = []
+
+    def cur_tokens() -> int:
+        return sum(estimate_tokens(c) for _, _, c in cur)
+
+    def flush(overlap: bool = True) -> None:
+        nonlocal cur
+        if cur:
+            s, e = cur[0][0], cur[-1][1]
+            chunks.append({"start": s, "end": e,
+                           "section_path": list(section_stack), "text": text[s:e]})
+        carry: list[tuple[int, int, str]] = []
+        if overlap and cur:
+            total = 0
+            for item in reversed(cur):
+                t = estimate_tokens(item[2])
+                if total + t > overlap_tokens:
+                    break
+                carry.append(item)
+                total += t
+            carry.reverse()
+        cur = carry
+
+    for s, e, content in lines:
+        stripped = content.strip()
+        if not stripped:
+            continue
+        if detect_headings:
+            lvl = _heading_level(content)
+            if lvl is not None:
+                flush(overlap=False)
+                while section_stack and len(section_stack) >= lvl:
+                    section_stack.pop()
+                section_stack.append(stripped[:120])
+                continue
+        t = estimate_tokens(content)
+        if cur and cur_tokens() + t > max_tokens:
+            flush(overlap=True)
+        cur.append((s, e, content))
+
+    flush(overlap=False)
+    return chunks
 
 
 def split_text_spans(text: str, max_chars: int = 600, min_chars: int = 100) -> list[list[int]]:
@@ -41,11 +153,30 @@ def split_text_spans(text: str, max_chars: int = 600, min_chars: int = 100) -> l
     return spans
 
 
-def _chunk_document(doc_id: str, title: str, file_path: str, full_text: str,
-                    source_format: str = "txt", max_chars: int = 600) -> list[Chunk]:
+def _chunk_document(
+    doc_id: str, title: str, file_path: str, full_text: str,
+    source_format: str = "txt",
+    max_chars: int = 600, max_tokens: int | None = None,
+    min_tokens: int = 50, overlap_tokens: int = 50,
+    detect_headings: bool = True,
+) -> list[Chunk]:
+    """按 token 预算（默认，对齐正常链路）或 600 字符定长（max_tokens=None）切分。
+
+    无论哪种都在 raw 偏移上切，charspan 直接对齐语料原文。
+    """
+    if max_tokens:
+        segs = token_budget_chunks(
+            full_text, max_tokens=max_tokens, min_tokens=min_tokens,
+            overlap_tokens=overlap_tokens, detect_headings=detect_headings,
+        )
+    else:
+        segs = [
+            {"start": s, "end": e, "section_path": [], "text": full_text[s:e]}
+            for s, e in split_text_spans(full_text, max_chars=max_chars)
+        ]
     chunks: list[Chunk] = []
-    for i, (s, e) in enumerate(split_text_spans(full_text, max_chars=max_chars)):
-        text = full_text[s:e].strip()
+    for i, seg in enumerate(segs):
+        text = seg["text"].strip()
         if not text:
             continue
         chunks.append(Chunk(
@@ -54,10 +185,10 @@ def _chunk_document(doc_id: str, title: str, file_path: str, full_text: str,
             metadata=ChunkMetadata(
                 doc_id=doc_id,
                 doc_title=title,
-                section_path=[],
+                section_path=list(seg.get("section_path", [])),
                 page_no=0,
                 bbox=[],
-                charspan=[s, e],
+                charspan=[seg["start"], seg["end"]],
                 label="paragraph",
                 source_format=source_format,
             ),
@@ -72,6 +203,10 @@ def ingest_corpus_dir(
     *,
     embed: bool = True,
     max_chars: int = 600,
+    max_tokens: int | None = None,
+    min_tokens: int = 50,
+    overlap_tokens: int = 50,
+    detect_headings: bool = True,
     doc_subset: str | None = None,
     max_files: int | None = None,
     file_list: list[str] | None = None,
@@ -137,7 +272,9 @@ def ingest_corpus_dir(
             blocks=[],
             chunks=[],
         )
-        doc.chunks = _chunk_document(doc_id, title, rel, content, max_chars=max_chars)
+        doc.chunks = _chunk_document(doc_id, title, rel, content, max_chars=max_chars,
+                                     max_tokens=max_tokens, min_tokens=min_tokens,
+                                     overlap_tokens=overlap_tokens, detect_headings=detect_headings)
         if not doc.chunks:
             skipped.append(f"{rel}: no chunks")
             continue
@@ -187,6 +324,10 @@ def ingest_contractnli_jsonl(
     *,
     embed: bool = True,
     max_chars: int = 600,
+    max_tokens: int | None = None,
+    min_tokens: int = 50,
+    overlap_tokens: int = 50,
+    detect_headings: bool = True,
     max_contracts: int | None = None,
     subsets: list[str] | None = None,
     idx_subset: list[str] | None = None,
@@ -195,7 +336,8 @@ def ingest_contractnli_jsonl(
 
     - 每个前提=一份文档：doc_id = "nli:{idx}"（idx=jsonl 行号，与实例 premise_id 对齐）、
       file_path = "contractnli/{idx}.txt"（占位，无真实路径）、full_text=前提原文；
-    - chunk 用 split_text_spans 对齐 raw 偏移，回填 search_tokens；
+    - chunk 默认按 token 预算 + 标题边界（对齐正常链路）；max_tokens=None 退回 600 字符定长；
+      始终在前提原文偏移上切，回填 search_tokens；
     - 可选 bge-m3 embedding（embed=False 时退化为 BM25-only）。
 
     idx_subset: 只入库这些 premise_id（对齐 PAKTON：只入被采样实例引用的合同）。
@@ -240,7 +382,9 @@ def ingest_contractnli_jsonl(
             blocks=[],
             chunks=[],
         )
-        doc.chunks = _chunk_document(doc_id, doc.title, file_path, full_text, max_chars=max_chars)
+        doc.chunks = _chunk_document(doc_id, doc.title, file_path, full_text, max_chars=max_chars,
+                                     max_tokens=max_tokens, min_tokens=min_tokens,
+                                     overlap_tokens=overlap_tokens, detect_headings=detect_headings)
         if not doc.chunks:
             skipped.append(f"{idx}: no chunks")
             continue
@@ -290,25 +434,31 @@ def nli_doc_ids(idx_list: list[str]) -> list[str]:
 
 
 def ingest_benchmark_cli(root: str, benchmark: str, session_id: str, embed: bool = True,
-                         max_files: int | None = None) -> None:
+                         max_files: int | None = None, max_tokens: int | None = None,
+                         min_tokens: int = 50, overlap_tokens: int = 50) -> None:
     """CLI 入口：入库单个 LegalBenchRAG benchmark。"""
     from src.contract.eval import loaders as L
 
     root_path = L.find_legalbench_root(root)
     t0 = time.time()
-    stats = ingest_corpus_dir(root_path, benchmark, session_id, embed=embed, max_files=max_files)
+    stats = ingest_corpus_dir(root_path, benchmark, session_id, embed=embed, max_files=max_files,
+                              max_tokens=max_tokens, min_tokens=min_tokens,
+                              overlap_tokens=overlap_tokens)
     stats["elapsed_s"] = time.time() - t0
     print(f"[ingest] 完成 benchmark={benchmark} session={session_id}: {stats}")
 
 
 def ingest_nli_cli(jsonl_path: str | None, session_id: str, embed: bool = True,
-                   max_contracts: int | None = None) -> None:
+                   max_contracts: int | None = None, max_tokens: int | None = None,
+                   min_tokens: int = 50, overlap_tokens: int = 50) -> None:
     """CLI 入口：入库 ContractNLI distinct 合同。"""
     from src.contract.eval import loaders as L
 
     path = L.find_contractnli_jsonl(jsonl_path)
     t0 = time.time()
-    stats = ingest_contractnli_jsonl(path, session_id, embed=embed, max_contracts=max_contracts)
+    stats = ingest_contractnli_jsonl(path, session_id, embed=embed, max_contracts=max_contracts,
+                                     max_tokens=max_tokens, min_tokens=min_tokens,
+                                     overlap_tokens=overlap_tokens)
     stats["elapsed_s"] = time.time() - t0
     print(f"[ingest] 完成 ContractNLI 合同入库 session={session_id}: {stats}")
 
@@ -330,12 +480,19 @@ if __name__ == "__main__":
     p.add_argument("--root", default=None, help="LegalBenchRAG 根目录")
     p.add_argument("--contractnli-jsonl", default=None, help="ContractNLI jsonl/zip（dataset=nli 时）")
     p.add_argument("--no-embed", action="store_true", help="不生成 embedding（降级 BM25-only）")
+    p.add_argument("--chunk-max-tokens", type=int, default=None,
+                   help="切片 token 预算（默认按配置/None=600 字符定长）")
+    p.add_argument("--chunk-min-tokens", type=int, default=50, help="切片最小 token（默认 50）")
+    p.add_argument("--chunk-overlap-tokens", type=int, default=50, help="同章节相邻切片重叠 token（默认 50）")
     p.add_argument("--max-files", type=int, default=None, help="LegalBenchRAG：只入库前 N 个文件")
     p.add_argument("--max-contracts", type=int, default=None, help="nli：只入库前 N 份合同（调试用）")
     args = p.parse_args()
+    chunk_kwargs = {"max_tokens": args.chunk_max_tokens,
+                    "min_tokens": args.chunk_min_tokens,
+                    "overlap_tokens": args.chunk_overlap_tokens}
     if args.dataset == "nli":
         ingest_nli_cli(args.contractnli_jsonl, args.session or "nli-contractnli",
-                       embed=not args.no_embed, max_contracts=args.max_contracts)
+                       embed=not args.no_embed, max_contracts=args.max_contracts, **chunk_kwargs)
     else:
         ingest_benchmark_cli(args.root, args.dataset, args.session or f"lb-{args.dataset}",
-                             embed=not args.no_embed, max_files=args.max_files)
+                             embed=not args.no_embed, max_files=args.max_files, **chunk_kwargs)

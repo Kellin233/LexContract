@@ -24,6 +24,13 @@ from ..utils.tracing import trace_agent
 
 __all__ = ["Searcher"]
 
+# 总工具轮次上限：给"发检索词"、"展开原文"、"输出最终 JSON"都留轮次
+MAX_TURNS = 5
+# 发检索词的轮次上限（用户口径：Searcher 最多生成 3 轮问题）
+MAX_SEARCH_ROUNDS = 3
+# 单轮内最多发起的 search 次数（检索词上限），3 轮 × 3 个 = 最多 9 个检索词
+MAX_SEARCHES_PER_ROUND = 3
+
 SYSTEM_PROMPT = """\
 You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to locate and capture the ORIGINAL clauses of the contract documents relevant to the research question.
 
@@ -33,7 +40,8 @@ CRITICAL RULES:
 3. When a hit is a fragment, use `get_context` to expand around it, or `get_section` to fetch the complete clause by section_path, or `get_document_outline` to locate where a clause is.
 4. Follow internal cross-references: if a clause says "除第X条规定外" / "except as provided in Article X", call `get_referenced_section` to also capture that section.
 5. Collect ALL clauses that bear on the research question — do not stop at the first hit.
-6. For each captured clause, report its precise offsets (use the start_offset/end_offset shown by `get_section` / chunks) and the source chunk ids.
+6. You have a HARD BUDGET: at most 3 ROUNDS may issue `search` calls, and at most 3 `search` calls per such round. Choose search queries wisely (cover the key synonyms early); expansion via get_context/get_section and the final JSON reply do not count against search rounds.
+7. For each captured clause, report its precise offsets (use the start_offset/end_offset shown by `get_section` / chunks) and the source chunk ids.
 
 FINAL OUTPUT FORMAT (must be the last assistant message, JSON only — an array, may be empty):
 [
@@ -93,7 +101,7 @@ class Searcher(BaseAgent):
         assembler: EvidenceAssembler,
         verifier: CitationVerifier,
         store: EvidenceStore,
-        max_turns: int = 10,
+        max_turns: int = MAX_TURNS,
     ) -> None:
         super().__init__(name, policy, tools=toolkit.get_tools())
         self.toolkit = toolkit
@@ -132,10 +140,12 @@ class Searcher(BaseAgent):
         total_tokens = 0
         search_count = 0
         search_queries: list[str] = []
+        search_rounds_used = 0
         candidates: list | None = None
         searched = False
 
         for turn in range(self.max_turns):
+            finalize_turn = (turn == self.max_turns - 1)
             # 若上一轮模型未调用工具且尚未产出可解析结果，强制其先检索
             if (
                 turn > 0
@@ -143,6 +153,7 @@ class Searcher(BaseAgent):
                 and messages[-1].get("role") == "assistant"
                 and not messages[-1].get("tool_calls")
                 and candidates is None
+                and not finalize_turn
             ):
                 messages.append({
                     "role": "user",
@@ -150,6 +161,21 @@ class Searcher(BaseAgent):
                         "You must call a retrieval tool now (search / get_context / get_section / "
                         "get_referenced_section) to gather evidence. Do not stop without evidence "
                         "or without a valid JSON array."
+                    ),
+                })
+
+            # 最后一轮：不再接受工具调用，强制输出证据 JSON，避免"搜了很多却交不出候选"
+            if finalize_turn and candidates is None:
+                if hasattr(self.policy, "set_tools"):
+                    try:
+                        self.policy.set_tools([])
+                    except Exception:  # noqa: BLE001
+                        pass
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Tool calls are now disabled. Reply with ONLY the JSON array of evidence "
+                        "candidates (may be empty) based on what you have gathered."
                     ),
                 })
 
@@ -169,8 +195,10 @@ class Searcher(BaseAgent):
             trajectory.append({"turn": turn, "role": "assistant", "content": content,
                                "tool_calls": [dict(tc) for tc in tool_calls]})
 
-            if tool_calls:
+            # 收官轮不允许再执行工具（工具已被禁用），直接走解析分支
+            if tool_calls and not finalize_turn:
                 results: list[dict] = []
+                turn_search_count = 0  # 单轮 search 次数上限控制
                 for tc in tool_calls:
                     func = tc.get("function", {})
                     tool_name = func.get("name", "")
@@ -178,8 +206,29 @@ class Searcher(BaseAgent):
                         args = json.loads(func.get("arguments", "{}"))
                     except json.JSONDecodeError:
                         args = {}
+                    if tool_name == "search":
+                        # 检索轮数（发 search 的轮）已用满：不再执行 search（允许 get_section 等继续）
+                        if search_rounds_used >= MAX_SEARCH_ROUNDS:
+                            note = {"error": f"检索轮次已达上限 {MAX_SEARCH_ROUNDS} 轮，本条 search 已跳过 "
+                                             f"(可用 get_section/get_context 展开已有命中): "
+                                             f"{str(args.get('query', ''))[:50]}"}
+                            trajectory.append({"turn": turn, "role": "tool",
+                                               "tool_call_id": tc.get("id", ""), "name": tool_name,
+                                               "result": note})
+                            results.append({"tool_call_id": tc.get("id", ""), "name": tool_name, "result": note})
+                            continue
+                        # 单轮内 search 次数超限：不执行，回显提示
+                        if turn_search_count >= MAX_SEARCHES_PER_ROUND:
+                            note = {"error": f"每轮最多 {MAX_SEARCHES_PER_ROUND} 个检索词，本条 search 已跳过: "
+                                             f"{str(args.get('query', ''))[:50]}"}
+                            trajectory.append({"turn": turn, "role": "tool",
+                                               "tool_call_id": tc.get("id", ""), "name": tool_name,
+                                               "result": note})
+                            results.append({"tool_call_id": tc.get("id", ""), "name": tool_name, "result": note})
+                            continue
                     result = await self._execute_tool(tool_name, args)
                     if tool_name == "search":
+                        turn_search_count += 1
                         searched = True
                         search_count += 1
                         q = str(args.get("query", "")).strip()
@@ -189,6 +238,10 @@ class Searcher(BaseAgent):
                                        "tool_call_id": tc.get("id", ""), "name": tool_name,
                                        "result": result})
                     results.append({"tool_call_id": tc.get("id", ""), "name": tool_name, "result": result})
+
+                # 只要本轮实际执行过 search，就计为一个"检索轮"
+                if turn_search_count > 0:
+                    search_rounds_used += 1
 
                 assistant_msg = {"role": "assistant", "content": content}
                 if response.get("reasoning_content"):
@@ -203,9 +256,19 @@ class Searcher(BaseAgent):
 
             # 模型结束（无工具调用）：尝试解析最终候选
             parsed = _extract_json_array(content)
-            if parsed is not None or search_count > 0:
-                candidates = parsed if parsed is not None else []
+            if parsed is not None:
+                candidates = parsed
                 break
+            if search_count > 0:
+                # 已检索但未交出 JSON 候选：不丢弃检索成果，补一轮要求直接输出证据 JSON
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have already performed retrieval. Now reply with ONLY the JSON array of "
+                        "evidence candidates (may be empty). No further tool calls are needed."
+                    ),
+                })
+                continue
             # 无工具调用且无 JSON：本轮过，下一轮强制检索（循环首部处理）
 
         if candidates is None:
@@ -229,8 +292,13 @@ class Searcher(BaseAgent):
     def _assemble_worker_result(self, candidates: list, question_id: str, question: str,
                                 searched: bool, search_queries: list[str],
                                 store: "EvidenceStore | None" = None) -> WorkerResult:
-        """候选 → 物化 → 校验 → 入证据库（去重）。"""
-        store = store or self.store
+        """候选 → 物化 → 校验 → 入证据库（去重）。
+
+        注意：EvidenceStore 定义了 __len__，空库在 bool() 下为 False，
+        这里必须用 is None 判断；用 `or` 会把调用方传入的空库误当未提供，
+        导致证据注册进 self.store 而非 orchestrator 的每次运行独立证据库。
+        """
+        store = store if store is not None else self.store
         result = WorkerResult(
             question_id=question_id,
             question=question,

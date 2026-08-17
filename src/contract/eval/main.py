@@ -180,6 +180,11 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
     seed = _seed(args, eval_cfg)
     agent_limit = args.agent_limit if args.agent_limit is not None else eval_cfg.get("agent_limit")
     sessions_cfg = dict(eval_cfg.get("sessions", {}) or {})
+    chunk_cfg = {
+        "max_tokens": eval_cfg.get("ingest_max_tokens"),
+        "min_tokens": int(eval_cfg.get("ingest_min_tokens", 50)),
+        "overlap_tokens": int(eval_cfg.get("ingest_overlap_tokens", 50)),
+    }
     out_dir = Path(args.out or eval_cfg["out_dir"])
     run_dir = make_run_dir(out_dir, "legalbenchrag")
 
@@ -210,7 +215,7 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
                 continue
             print(f"  [ingest] 会话 {session} 为空，原样入库 corpus/{name} ...")
             ingest_corpus_dir(root, name, session, embed=bool(eval_cfg.get("embedding_corpus", True)),
-                              file_list=file_list)
+                              file_list=file_list, **chunk_cfg)
         print(f"  [ingest] 会话 {session} 文档数 = {_session_doc_count(session)}")
 
         records_path = run_dir / f"{name}.jsonl"
@@ -349,7 +354,10 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
                       + " ...")
                 from src.contract.eval.ingest_raw import ingest_contractnli_jsonl
                 ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)),
-                                         idx_subset=idx_subset)
+                                         idx_subset=idx_subset,
+                                         max_tokens=eval_cfg.get("ingest_max_tokens"),
+                                         min_tokens=int(eval_cfg.get("ingest_min_tokens", 50)),
+                                         overlap_tokens=int(eval_cfg.get("ingest_overlap_tokens", 50)))
             else:
                 print(f"[contractnli] 会话 {nli_session} 无合同入库（indexed 模式需要全库）。")
                 print("  请先手动入库（不会自动执行）:  python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl/zip> --session " + nli_session)

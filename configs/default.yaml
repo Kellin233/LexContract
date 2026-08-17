@@ -262,6 +262,11 @@ eval:
   contractnli_top_k: 8
   # 抽样种子（可复现）
   seed: 0
+  # 评测语料切片（ingest 时）：token 预算对齐正常链路（None 退回 600 字符定长）；
+  # 在 raw 偏移上做标题边界 + 重叠，偏移对齐不受影响
+  ingest_max_tokens: 600
+  ingest_min_tokens: 50
+  ingest_overlap_tokens: 50
   # corpus 入 PG 时是否生成 bge-m3 embedding（关闭则退化为 BM25-only；已入库的 session 不受影响）
   embedding_corpus: true
   # 各 LegalBenchRAG benchmark 使用的数据库会话（隔离，避免跨 benchmark 污染）
