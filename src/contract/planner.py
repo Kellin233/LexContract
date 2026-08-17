@@ -133,6 +133,24 @@ class Planner:
         # 降级：直接把原问题当作唯一调查目标
         return [ResearchQuestion(question_id="Q1", question=question)]
 
+    @trace_chain(name="planner.solve", tags=["contract", "planner", "nli"])
+    def solve(self, prompt: str, system_prompt: str | None = None) -> dict | None:
+        """通用执行：调用 LLM 并稳健解析 JSON（供 ContractNLI 分类等评测复用）。
+
+        - LLM 调用失败：抛 PlanParseError（由调用方决定如何记为错误样例）；
+        - 输出无法解析出 JSON 对象：返回 None（调用方记为标签解析失败）。
+        """
+        messages = [
+            {"role": "system", "content": system_prompt or "You are a legal text classification assistant. Output valid JSON only."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = self.policy(messages)
+        except RuntimeError as e:
+            raise PlanParseError(f"LLM call failed: {e}") from e
+        content = response.get("content", "") or ""
+        return _extract_json_object(content)
+
     @trace_chain(name="planner.incremental_plan", tags=["contract", "planner"])
     def incremental_plan(self, state: ResearchState) -> list[ResearchQuestion]:
         """增量规划：只补缺失要点。"""

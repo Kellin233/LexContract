@@ -336,6 +336,30 @@ python tests/contract_smoke.py
 - 原地改造：`scripts/run_single.py` 已改为合同入口（`--session` 必填）；`evaluation/`、`run_ablation.py`、`run_benchmark.py` 等面向旧 web 流程的脚本已不再适配（标注弃用）。原 `ResearcherAgent` 的 web 工具、M5 Red/Blue 对抗、M6 进化在合同流程中不再使用（文件保留便于回溯）。
 - 设计要点：Chunk 只服务检索效率，Evidence 才服务引用与推理；中间层不产出推理性结论，把主要推理压力集中到最终 Refiner，降低错误在多轮 Agent 间传播的风险。
 
+### 评测（LegalBenchRAG + ContractNLI）
+
+对合同流程的回归评测集中在 `src/contract/eval/`，数据取自本机（不联网下载）：LegalBenchRAG（`contractnli/cuad/maud/privacy_qa` 4 个 benchmark）+ ContractNLI（整份合同做 premise 的 NLI）。
+
+核心思路：
+- **偏移对齐优先**：LegalBenchRAG 的 gold `span` 是 corpus 原始 txt 的字符偏移。`ingest_raw.py` 把语料“原样入 PG”（`full_text` 逐字保留原文，chunk 的 `charspan` 对齐 raw 文本），确保检索结果/证据区间能与 gold 精确比对。已抽验 DB 与原文逐字一致。
+- **双报（RAG 能力）**：确定性混合检索（全量 query，产出文档级 `Recall@k(k=1..64)` + MRR）＋ LLM Searcher agent（按 `--agent-limit` 抽样，产出字符区间 `Precision/Recall/F1`）。
+- **分类（端到端能力）**：复用 `Planner` 新增的通用 `solve(prompt)` 方法 + `ContractNLIAdapter` 分类 prompt，输出 `Accuracy / weighted F1 / per-class F1`。
+- **适配器**：`adapter.py` 的 `LegalBenchAdapter` / `ContractNLIAdapter` 负责基准输入（query→Searcher 任务、(premise,hypothesis)→prompt）、输出（证据→`(file_path,span)` 命中、原始输出→标签）、提示词的适配。
+- **全量持久化**：每条输入 → prompt → 原始输出 → gold → 得分 → 遥测/轨迹，逐条写入 `records.jsonl`（即时 flush），`summary.json` + `metrics.csv` 汇总，以 `instance_id` 断点续跑。
+
+```bash
+# 语料入库（评测会自动处理缺失会话，也可手动）：
+python -m src.contract.eval.ingest_raw contractnli        # cuad / maud / privacy_qa
+# LegalBenchRAG：确定性部分全量，agent 部分按配置抽样
+python -m src.contract.eval.main --mode legalbenchrag
+# 只看某个 benchmark / 调整抽样
+python -m src.contract.eval.main --mode legalbenchrag --only privacy_qa --agent-limit 20
+# ContractNLI（单条/抽样验证）：
+python -m src.contract.eval.main --mode contractnli --subset test --limit 10
+```
+
+输出在 `configs/default.yaml` 的 `eval:` 段可配（top-k、抽样规模、会话、输出目录）。已验证跑通的最小闭环：LegalBenchRAG 确定性全量（privacy_qa 194 条，R@1=0.881 / MRR=0.923）+ agent 抽样 + ContractNLI 抽样。
+
 ---
 
 ## 🗺️ Roadmap

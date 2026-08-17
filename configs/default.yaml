@@ -239,3 +239,27 @@ contract:
   # 会话/文档作用域可覆盖：--session / --doc
   # session_id: "S1"
   # doc_ids: []
+
+eval:
+  # ---------------------------------------------------------------------------
+  # 评测配置（python -m src.contract.eval.main）
+  # ---------------------------------------------------------------------------
+  # 输出根目录（每个 run 会创建 <out>/<mode>/<时间戳>/）
+  out_dir: "evaluation/runs"
+  # LegalBenchRAG 的 top-k 集合（Recall@k）
+  k: [1, 2, 4, 8, 16, 32, 64]
+  # 每个 benchmark 用真实 LLM Searcher 参与评测的 query 抽样数
+  #   None=全量 query 都跑 agent；0=只跑确定性部分；正整数=按 seed 抽样
+  agent_limit: 20
+  # ContractNLI 的抽样数（None=全量）
+  contractnli_limit:
+  # 抽样种子（可复现）
+  seed: 0
+  # corpus 入 PG 时是否生成 bge-m3 embedding（关闭则退化为 BM25-only；已入库的 session 不受影响）
+  embedding_corpus: true
+  # 各 LegalBenchRAG benchmark 使用的数据库会话（隔离，避免跨 benchmark 污染）
+  sessions:
+    contractnli: "lb-contractnli"
+    cuad: "lb-cuad"
+    maud: "lb-maud"
+    privacy_qa: "lb-privacy_qa"
