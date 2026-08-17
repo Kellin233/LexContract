@@ -341,7 +341,7 @@ python tests/contract_smoke.py
 对合同流程的回归评测集中在 `src/contract/eval/`，数据取自本机（不联网下载）：LegalBenchRAG（`contractnli/cuad/maud/privacy_qa` 4 个 benchmark）+ ContractNLI（整份合同做 premise 的 NLI）。
 
 核心思路：
-- **偏移对齐优先**：LegalBenchRAG 的 gold `span` 是 corpus 原始 txt 的字符偏移。`ingest_raw.py` 把语料"原样入 PG"（`full_text` 逐字保留原文），在 **raw 偏移上**做切片：默认按 **token 预算（600，对齐正常链路）+ 标题启发式边界 + 相邻重叠**，`charspan` 直接就是语料原文坐标，与 gold 精确比对。已抽验 DB 与原文逐字一致（33425 切片刻画 0 偏移错位，gold span 覆盖 ≈0.999）。
+- **偏移对齐优先**：LegalBenchRAG 的 gold `span` 是 corpus 原始 txt 的字符偏移。`ingest_raw.py` 把语料"原样入 PG"（`full_text` 逐字保留原文），在 **raw 偏移上**做切片：默认按 **token 预算（500，对齐 PAKTON `chunk_sizes=[500]`）+ 标题启发式边界 + 相邻重叠**，`charspan` 直接就是语料原文坐标，与 gold 精确比对。已抽验 DB 与原文逐字一致（38521 切片刻画 0 偏移错位，gold span 覆盖 ≈0.999）。
 - **双报（RAG 能力）**：确定性混合检索（全量 query，产出文档级 `Recall@k(k=1..64)` + MRR）＋ LLM Searcher agent（按 `--agent-limit` 抽样，产出字符区间 `Precision/Recall/F1`）。
 - **分类（端到端能力）**：ContractNLI 默认走 **`indexed`（整库入库 + 检索式）**，对齐 PAKTON 的"文档内检索"口径——607 份 distinct 合同先入库，每条假设在该合同索引内检索出相关条款（原文+偏移）再交给 `Planner` 归类；`--nli-mode direct` 保留"整段前提直喂"的 naive baseline。输出 `Accuracy / weighted F1 / per-class F1`。
 - **适配器**：`adapter.py` 的 `LegalBenchAdapter` / `ContractNLIAdapter` 负责基准输入（query→Searcher 任务、(premise,hypothesis)→prompt）、输出（证据→`(file_path,span)` 命中、原始输出→标签）、提示词的适配。
