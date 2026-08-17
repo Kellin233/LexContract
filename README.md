@@ -262,7 +262,7 @@ deep_research_agent/
  ↓
 Planner 拆解“需要调查什么”（研究问题，禁止中间结论）
  ↓
-多个 EvidenceWorker 并行收集证据（只找完整可引用的原始条款，不写结论）
+多个 Searcher 并行收集证据（只找完整可引用的原始条款，不写结论）
  ↓
 EvidenceAssembler 把碎片 Chunk 恢复成连续原文（quote 一律取自 DB full_text）
  ↓
@@ -284,8 +284,8 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 | 文件 | 职责 |
 |------|------|
 | `schemas.py` | Evidence / ResearchQuestion / WorkerResult / ReviewResult / RefinerResult / ResearchState |
-| `planner.py` | ContractPlanner：initial_plan（拆调查要点）+ incremental_plan（只补缺失） |
-| `worker.py` | EvidenceWorker：多轮检索循环，输出 WorkerResult（仅证据，绝不输出结论） |
+| `planner.py` | Planner：initial_plan（拆调查要点）+ incremental_plan（只补缺失） |
+| `worker.py` | Searcher：多轮检索循环，输出 WorkerResult（仅证据，绝不输出结论） |
 | `tools.py` | DocumentToolkit：`search` / `get_chunk` / `get_context` / `get_section` / `get_document_outline` / `get_referenced_section` |
 | `assembler.py` | EvidenceAssembler：碎片 Chunk → 用于引用的连续原文 Evidence |
 | `verifier.py` | CitationVerifier：quote 与 DB 原文精确比对 + 切片覆盖无空洞 |

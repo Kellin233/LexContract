@@ -1,4 +1,4 @@
-"""ContractPlanner：把原问题拆成“需要调查什么”（research questions），并支持增量补充。
+"""Planner：把原问题拆成“需要调查什么”（research questions），并支持增量补充。
 
 原则（见方案）：
 - 只生成“调查目标”，禁止生成中间答案。
@@ -15,7 +15,7 @@ from .schemas import ResearchQuestion, ResearchState, QuestionStatus
 from ..utils.tracing import trace_chain
 
 
-__all__ = ["ContractPlanner", "PlanParseError"]
+__all__ = ["Planner", "PlanParseError"]
 
 
 class PlanParseError(Exception):
@@ -116,14 +116,14 @@ def _deserialize_questions(questions: list[Any]) -> list[ResearchQuestion]:
     return [q for q in out if q.question]
 
 
-class ContractPlanner:
+class Planner:
     def __init__(self, policy) -> None:
         self.policy = policy
 
     # ------------------------------------------------------------------
     # 公共 API
     # ------------------------------------------------------------------
-    @trace_chain(name="contract_planner.initial_plan", tags=["contract", "planner"])
+    @trace_chain(name="planner.initial_plan", tags=["contract", "planner"])
     def initial_plan(self, question: str) -> list[ResearchQuestion]:
         """首次规划：拆解调查要点。"""
         prompt = INITIAL_PLAN_PROMPT.format(question=question)
@@ -133,7 +133,7 @@ class ContractPlanner:
         # 降级：直接把原问题当作唯一调查目标
         return [ResearchQuestion(question_id="Q1", question=question)]
 
-    @trace_chain(name="contract_planner.incremental_plan", tags=["contract", "planner"])
+    @trace_chain(name="planner.incremental_plan", tags=["contract", "planner"])
     def incremental_plan(self, state: ResearchState) -> list[ResearchQuestion]:
         """增量规划：只补缺失要点。"""
         next_seq = len(state.questions) + 1

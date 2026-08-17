@@ -104,7 +104,7 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     from src.contract.assembler import EvidenceAssembler
     from src.contract.verifier import CitationVerifier
     from src.contract.store import EvidenceStore
-    from src.contract.worker import EvidenceWorker
+    from src.contract.worker import Searcher
 
     toolkit = DocumentToolkit(session_id=session_id)
     assembler = EvidenceAssembler(toolkit)
@@ -112,9 +112,9 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     modules["toolkit"] = toolkit
     modules["evidence_store"] = EvidenceStore()
 
-    def _make_evidence_worker():
-        return EvidenceWorker(
-            name="evidence_worker",
+    def _make_searcher():
+        return Searcher(
+            name="searcher",
             policy=modules.get("solver_policy", default_policy),
             toolkit=toolkit,
             assembler=assembler,
@@ -125,22 +125,22 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 规划 / 审查 / 结论
     # ------------------------------------------------------------------
-    from src.contract.planner import ContractPlanner
+    from src.contract.planner import Planner
     from src.contract.reviewer import Reviewer
     from src.contract.refiner import Refiner
     from src.orchestrator.agent_pool import AgentPool
     from src.orchestrator.orchestrator import Orchestrator
 
-    contract_planner = ContractPlanner(policy=modules.get("planner_policy", default_policy))
+    planner = Planner(policy=modules.get("planner_policy", default_policy))
     reviewer = Reviewer(policy=modules.get("judge_policy", default_policy))
     refiner = Refiner(policy=modules.get("summarizer_policy", default_policy))
-    modules["contract_planner"] = contract_planner
+    modules["planner"] = planner
     modules["reviewer"] = reviewer
     modules["refiner"] = refiner
 
     agent_pool = AgentPool(
         policy_factory=lambda: modules.get("solver_policy", default_policy),
-        worker_factory=_make_evidence_worker,
+        worker_factory=_make_searcher,
         max_idle=3,
     )
     modules["agent_pool"] = agent_pool
@@ -155,7 +155,7 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     modules["memory_store"] = memory_store
 
     orchestrator = Orchestrator(
-        planner=contract_planner,
+        planner=planner,
         agent_pool=agent_pool,
         reviewer=reviewer,
         refiner=refiner,

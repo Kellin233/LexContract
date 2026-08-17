@@ -1,4 +1,4 @@
-"""DocumentToolkit：EvidenceWorker 的检索工具面。
+"""DocumentToolkit：Searcher 的检索工具面。
 
 包装 src/retrieval 的 PostgresRetriever（search/get_chunk/get_context），
 并新增条款级工具（get_section / get_document_outline / get_referenced_section），
@@ -325,7 +325,7 @@ class DocumentToolkit:
         return None
 
     # ------------------------------------------------------------------
-    # 工具适配面（供 EvidenceWorker 使用）
+    # 工具适配面（供 Searcher 使用）
     # ------------------------------------------------------------------
     def get_tools(self) -> list["DocumentTool"]:
         """构建 OpenAI function-calling 工具对象列表。"""

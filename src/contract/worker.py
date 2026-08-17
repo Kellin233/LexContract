@@ -1,4 +1,4 @@
-"""EvidenceWorker：针对研究问题收集完整、可引用的原始证明条款。
+"""Searcher：针对研究问题收集完整、可引用的原始证明条款。
 
 边界（见方案）：只找证据，不输出任何结论。
 - 可多次检索（同义扩展：终止/解除/单方解除/退出…）
@@ -22,7 +22,7 @@ from ..orchestrator.schemas import SubTask, AgentResult, AgentStatus
 from ..utils.tracing import trace_agent
 
 
-__all__ = ["EvidenceWorker"]
+__all__ = ["Searcher"]
 
 SYSTEM_PROMPT = """\
 You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to locate and capture the ORIGINAL clauses of the contract documents relevant to the research question.
@@ -82,8 +82,8 @@ def _extract_json_array(text: str) -> list | None:
     return None
 
 
-class EvidenceWorker(BaseAgent):
-    """证据检索 Worker：多轮 tool-calling，输出 WorkerResult（仅证据）。"""
+class Searcher(BaseAgent):
+    """证据检索 Searcher：多轮 tool-calling，输出 WorkerResult（仅证据）。"""
 
     def __init__(
         self,
@@ -103,7 +103,7 @@ class EvidenceWorker(BaseAgent):
         self.max_turns = max_turns
         self.tool_map: dict[str, Any] = {t.name: t for t in (self.tools or [])}
 
-    @trace_agent(name="evidence_worker.run", tags=["contract", "worker"])
+    @trace_agent(name="searcher.run", tags=["contract", "worker"])
     async def run(self, task: SubTask, context: dict) -> AgentResult:
         question = task.description or context.get("question", "")
         question_id = task.task_id

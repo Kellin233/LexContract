@@ -2,8 +2,8 @@
 LexContract — 合同证据链编排器（改造自 deep-research M1 Orchestrator）
 
 状态机流程：
-  IDLE → PLANNING(ContractPlanner.initial_plan)
-       → DISPATCHING(EvidenceWorker 并行，沿用 DAG 分层 + Semaphore + 超时)
+  IDLE → PLANNING(Planner.initial_plan)
+       → DISPATCHING(Searcher 并行，沿用 DAG 分层 + Semaphore + 超时)
        → COLLECTING(EvidenceAssembly → CitationVerifier → EvidenceStore → 写入 ResearchState)
        → REVIEWING(Reviewer：覆盖度/冲突/缺口)
             ├─ SUFFICIENT → REFINING(Refiner → Final Answer)
@@ -40,7 +40,7 @@ from ..contract.schemas import (
     QuestionStatus,
 )
 from ..contract.store import EvidenceStore
-from ..contract.planner import ContractPlanner
+from ..contract.planner import Planner
 from ..contract.reviewer import Reviewer
 from ..contract.refiner import Refiner
 from ..utils.tracing import trace_chain
@@ -55,8 +55,8 @@ class Orchestrator:
     """合同证据链编排器。
 
     Attributes:
-        planner: ContractPlanner（initial + incremental）。
-        agent_pool: 对象池，EVIDENCE 任务返回 EvidenceWorker。
+        planner: Planner（initial + incremental）。
+        agent_pool: 对象池，EVIDENCE 任务返回 Searcher。
         reviewer / refiner: 完整性与结论模块。
         evidence_store: 运行期证据库（每次 run 重置）。
         compressor: 可选，仅用于压缩规划/审查历史，绝不压缩 Evidence。
@@ -65,7 +65,7 @@ class Orchestrator:
 
     def __init__(
         self,
-        planner: ContractPlanner,
+        planner: Planner,
         agent_pool: AgentPool,
         reviewer: Reviewer | None = None,
         refiner: Refiner | None = None,
@@ -191,7 +191,7 @@ class Orchestrator:
         return OrchestratorState.DISPATCHING
 
     async def _do_dispatching(self) -> OrchestratorState:
-        """DAG 分层 + Semaphore 并发执行 EvidenceWorker。"""
+        """DAG 分层 + Semaphore 并发执行 Searcher。"""
         if self._dag is None or len(self._dag) == 0:
             return OrchestratorState.COLLECTING
 

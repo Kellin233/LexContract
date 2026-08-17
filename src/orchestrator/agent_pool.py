@@ -156,7 +156,7 @@ class AgentPool:
         """从 Agent 实例推断其类型键。"""
         # 简单启发式：通过类名推断
         cls_name = agent.__class__.__name__
-        if "EvidenceWorker" in cls_name:
+        if "Searcher" in cls_name:
             return "evidence"
         if "Summarizer" in cls_name:
             return "synthesize"

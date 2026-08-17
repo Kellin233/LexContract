@@ -63,7 +63,7 @@ class ResearchQuestion(BaseModel):
 
 
 class WorkerResult(BaseModel):
-    """EvidenceWorker 的最终输出：只携带证据，不携带结论。"""
+    """Searcher 的最终输出：只携带证据，不携带结论。"""
 
     question_id: str
     question: str
