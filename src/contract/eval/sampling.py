@@ -127,3 +127,45 @@ def write_request_set(obj: dict, out_path: str | Path) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
     return p
+
+
+def subsample_request_set(request_set: dict, ratio: float = 0.1, seed: int = 0) -> dict:
+    """从已有请求集合按比例子采样（保持 benchmark/标签比例），用于试跑。
+
+    - legalbenchrag：total = round(total*ratio)，按各 benchmark 的请求数分配，组内抽样；
+      doc_ids 记录被采到请求引用的文档（供 --ingest-only-referenced 调试）。
+    - contractnli：total 按 label_counts_sampled 比例分配，组内抽样。
+    """
+    mode = request_set.get("mode")
+    if mode == "legalbenchrag":
+        samples = request_set.get("samples", {})
+        new_total = max(1, round(request_set.get("total", 0) * ratio))
+        counts = {b: info["count"] for b, info in samples.items()}
+        alloc = _alloc(new_total, [counts[b] for b in samples])
+        out_samples: dict = {}
+        for b, n in zip(samples, alloc):
+            rng = random.Random(f"sub-{b}:{seed}")
+            chosen = rng.sample(samples[b]["queries"], min(n, len(samples[b]["queries"])))
+            docs = sorted(d for d in samples[b]["doc_ids"])  # 保留原始 doc 元数据
+            out_samples[b] = {"count": len(chosen), "queries": chosen, "doc_ids": docs}
+        return {"mode": mode, "total": sum(v["count"] for v in out_samples.values()),
+                "seed": seed, "ratio": ratio, "source": request_set, "samples": out_samples}
+    if mode == "contractnli":
+        instances = request_set.get("instances", [])
+        new_total = max(1, round(request_set.get("total", 0) * ratio))
+        by_label: dict[str, list[dict]] = {}
+        for inst in instances:
+            by_label.setdefault(inst["label"], []).append(inst)
+        labels = sorted(by_label)
+        counts = [len(by_label[l]) for l in labels]
+        alloc = _alloc(new_total, counts)
+        chosen: list[dict] = []
+        for lab, n in zip(labels, alloc):
+            rng = random.Random(f"sub-{lab}:{seed}")
+            chosen.extend(rng.sample(by_label[lab], min(n, len(by_label[lab]))))
+        contracts = sorted({c["premise_id"] for c in chosen})
+        return {"mode": mode, "subset": request_set.get("subset"), "total": len(chosen),
+                "seed": seed, "ratio": ratio, "source": request_set,
+                "label_counts_sampled": {l: sum(1 for c in chosen if c["label"] == l) for l in labels},
+                "instances": chosen, "contracts": contracts}
+    raise ValueError(f"unsupported request_set mode: {mode}")

@@ -176,8 +176,10 @@ def _chunk_document(
         ]
     chunks: list[Chunk] = []
     for i, seg in enumerate(segs):
-        text = seg["text"].strip()
-        if not text:
+        text = seg["text"]
+        # 关键：存 full_text[start:end] 的精确切片（不 strip），保证
+        # chunk.text == full_text[charspan]，否则 CitationVerifier / span 对齐会失真
+        if not text.strip():
             continue
         chunks.append(Chunk(
             id=f"{doc_id}:{i}",
