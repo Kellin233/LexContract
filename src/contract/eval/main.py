@@ -57,6 +57,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="每个 benchmark 用真实 LLM Searcher 的 query 数（0=只跑确定性，None=配置默认）")
     p.add_argument("--limit", type=int, default=None,
                    help="ContractNLI 抽样数（None=配置默认/全量）")
+    p.add_argument("--nli-mode", default=None, choices=["indexed", "direct"],
+                   help="ContractNLI 评测方式：indexed=整库入库+检索式（默认，对齐 PAKTON）；"
+                        "direct=整段前提直喂（naive baseline）")
+    p.add_argument("--nli-session", default=None,
+                   help="ContractNLI 合同索引会话（默认 nli-contractnli）")
+    p.add_argument("--nli-top-k", type=int, default=None,
+                   help="ContractNLI 检索式下每条的检索条款数（默认 8）")
+    p.add_argument("--ingest-nli", action="store_true",
+                   help="ContractNLI 会话为空时允许自动入库 distinct 合同（默认禁止）")
     p.add_argument("--seed", type=int, default=None, help="抽样种子")
     p.add_argument("--session", default=None,
                    help="覆盖所有 benchmark 的数据库会话（单 benchmark 调试用）")
@@ -282,6 +291,24 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         print(f"[contractnli] 没有可评测的实例（subset={args.subset!r}）")
         return 1
 
+    mode = args.nli_mode or eval_cfg.get("contractnli_mode", "indexed")
+    nli_session = args.nli_session or eval_cfg.get("nli_session", "nli-contractnli")
+    top_k = args.nli_top_k if args.nli_top_k is not None else int(eval_cfg.get("contractnli_top_k", 8))
+
+    if mode == "indexed":
+        n_docs = _session_doc_count(nli_session)
+        if n_docs == 0:
+            if args.ingest_nli:
+                print(f"[contractnli] 会话 {nli_session} 为空，自动入库 {len(records)} 条实例涉及的 distinct 合同 ...")
+                from src.contract.eval.ingest_raw import ingest_contractnli_jsonl
+                ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)))
+            else:
+                print(f"[contractnli] 会话 {nli_session} 无合同入库（indexed 模式需要全库）。")
+                print("  请先手动入库（不会自动执行）:  python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl/zip> --session " + nli_session)
+                print("  或者加 --ingest-nli 让本次自动入库。")
+                return 1
+        print(f"[contractnli] 会话 {nli_session} 合同数 = {_session_doc_count(nli_session)}（indexed：整库入库+检索式）")
+
     limit = args.limit if args.limit is not None else eval_cfg.get("contractnli_limit")
     seed = _seed(args, eval_cfg)
     out_dir = Path(args.out or eval_cfg["out_dir"])
@@ -289,10 +316,11 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
     records_path = run_dir / "records.jsonl"
     done = load_done_ids(records_path)
 
-    print(f"[contractnli] 总 {len(records)} 条实例（subset={args.subset or 'all'}），"
+    print(f"[contractnli] 总 {len(records)} 条实例（subset={args.subset or 'all'}，mode={mode}），"
           f"已完成 {len(done)}，本次处理上限 {limit or '全部'}")
     stats = run_contractnli(records, planner=planner, records_path=records_path,
-                            limit=limit, seed=seed, done_ids=done)
+                            limit=limit, seed=seed, done_ids=done,
+                            mode=mode, nli_session=nli_session, top_k=top_k)
     summ = summarize_contractnli_records(records_path)
 
     summary = {
@@ -300,8 +328,9 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         "started_at": now_iso(),
         "finished_at": now_iso(),
         "config": {"limit": limit, "seed": seed, "subset": args.subset,
+                   "nli_mode": mode, "nli_session": nli_session, "nli_top_k": top_k,
                    "contractnli_jsonl": str(path)},
-        "metrics": {k: v for k, v in summ.items() if k != "class_counts_true" and k != "class_counts_pred"},
+        "metrics": {k: v for k, v in summ.items() if k not in ("class_counts_true", "class_counts_pred")},
         "class_counts_true": summ.get("class_counts_true", {}),
         "class_counts_pred": summ.get("class_counts_pred", {}),
         "n_instances": summ["n_total"],
@@ -316,7 +345,8 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         rows.append({"metric": f"f1_{cls}", "value": round(f1, 4)})
     write_csv(run_dir / "metrics.csv", rows)
 
-    print(f"[contractnli] 本次新增 {stats['evaluated']} 条（累计 {summ['n_total']}，错误 {summ['n_errors']}）")
+    print(f"[contractnli] 本次新增 {stats['evaluated']} 条（累计 {summ['n_total']}，错误 {summ['n_errors']}"
+          + (f"，检索空 {summ['n_indexed_retrieved_zero']}" if mode == "indexed" else "") + "）")
     print(f"[contractnli] accuracy={summ['accuracy']:.4f}  f1_weighted={summ['f1_weighted']:.4f}")
     print(f"[contractnli] 输出目录: {run_dir}")
     return 0

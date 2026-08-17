@@ -253,6 +253,13 @@ eval:
   agent_limit: 20
   # ContractNLI 的抽样数（None=全量）
   contractnli_limit:
+  # ContractNLI 评测方式：indexed=整库入库+检索式（默认，对齐 PAKTON 的 multi-agent 口径）
+  #                      direct=整段前提直喂（等价 PAKTON 的 naive zero-shot baseline）
+  contractnli_mode: "indexed"
+  # ContractNLI 合同索引会话（与 LegalBenchRAG 的 contractnli benchmark 分库隔离）
+  nli_session: "nli-contractnli"
+  # ContractNLI 检索式下每条按 hypothesis 检索的条款数
+  contractnli_top_k: 8
   # 抽样种子（可复现）
   seed: 0
   # corpus 入 PG 时是否生成 bge-m3 embedding（关闭则退化为 BM25-only；已入库的 session 不受影响）

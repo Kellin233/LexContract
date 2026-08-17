@@ -45,11 +45,16 @@ class NliRecord(BaseModel):
 
     instance_id: str
     premise_id: str = ""  # 合同在 jsonl 中的行索引
+    subset: str = ""  # train/dev/test
     premise_preview: str = ""  # 仅存前 N 字符，避免超大 JSON
     hypothesis: str
     gold_label: str
     pred_label: Optional[str] = None  # entailment/contradiction/neutral 或 None(解析失败)
     pred_valid: bool = True  # True=解析出合法标签；False=记录为错误样例(-1)
+    mode: str = "direct"  # direct=整段前提直喂；indexed=整库入库+检索式
+    doc_id: str = ""  # indexed 模式下对应的合同 doc_id
+    retrieved_n: int = 0  # indexed 模式下检索到的条款片段数
+    retrieved_chunks: list = Field(default_factory=list)  # [{id, text_preview, span, score}]
     prompt: str = ""
     raw_response: str = ""
     reasoning: str = ""  # 可选

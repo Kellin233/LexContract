@@ -83,6 +83,34 @@ def load_contractnli_records(path: Path, subset: str | None = None) -> list[dict
     return out
 
 
+def load_contractnli_premises(path: Path, subsets: list[str] | None = None) -> list[dict]:
+    """按“前提（合同）”去重读取，供整库入库用。
+
+    每条返回 {idx, subset, premise, n_hypotheses, premise_len}；idx 即 jsonl 行号
+    （与 load_contractnli_records 的 premise_id 对齐，实例 doc_id 稳定）。
+    """
+    out: list[dict] = []
+    for idx, line in enumerate(_read_jsonl_lines(path)):
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        sub = rec.get("subset", "")
+        if subsets and sub not in subsets:
+            continue
+        premise = rec.get("premise", "")
+        if not premise:
+            continue
+        out.append({
+            "idx": f"{idx}",
+            "subset": sub,
+            "premise": premise,
+            "premise_len": len(premise),
+            "n_hypotheses": len(rec.get("hypothesises/labels", [])),
+        })
+    return out
+
+
 # ---------- LegalBenchRAG ----------
 def find_legalbench_root(explicit: str | None = None) -> Path:
     if explicit:

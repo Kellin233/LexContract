@@ -190,6 +190,25 @@ Output STRICT JSON only:
 {hypothesis}
 """
 
+RETRIEVAL_PROMPT = """\
+You are a legal expert. Judge whether the HYPOTHESIS is entailed by, contradicted by, or neutral with respect to the CONTRACT.
+
+Below are passages extracted from the contract that are likely relevant to the hypothesis (original text, with character offsets into the contract). Base your decision ONLY on this contract content.
+
+- "entailment": the contract necessarily implies the hypothesis.
+- "contradiction": the contract necessarily contradicts the hypothesis.
+- "neutral": neither entailment nor contradiction can be determined.
+
+Output STRICT JSON only:
+{{"label": "entailment" | "contradiction" | "neutral", "reasoning": "one sentence"}}
+
+## RELEVANT CONTRACT PASSAGES
+{passages}
+
+## HYPOTHESIS
+{hypothesis}
+"""
+
 
 def _normalize_label(text: str) -> str | None:
     s = (text or "").strip().lower()
@@ -200,11 +219,33 @@ def _normalize_label(text: str) -> str | None:
 
 
 class ContractNLIAdapter:
-    """把 (premise, hypothesis) 适配为分类 prompt，并把输出解析为标签。"""
+    """把 (premise, hypothesis) 适配为分类 prompt，并把输出解析为标签。
+
+    mode:
+      - direct：整段前提进 prompt（等价 PAKTON 的 naive zero-shot baseline）；
+      - indexed：先把合同入库并从库里检索出相关条款，把检索到的条款（原文+偏移）
+        送进 prompt（对齐 PAKTON 的“文档内检索”口径，也更省 token）。
+    """
 
     @staticmethod
     def build_prompt(premise: str, hypothesis: str) -> str:
         return CONTRACTNLI_PROMPT.format(premise=premise, hypothesis=hypothesis)
+
+    @staticmethod
+    def build_retrieval_prompt(chunks: list[dict], hypothesis: str) -> str:
+        """chunks: DocumentToolkit.search 返回的行（含 text/charspan）。"""
+        passages: list[str] = []
+        for i, c in enumerate(chunks, 1):
+            text = str(c.get("text", "")).strip()
+            if not text:
+                continue
+            span = c.get("charspan") or []
+            loc = f" (offset {span[0]}-{span[1]})" if len(span) == 2 else ""
+            passages.append(f"[{i}]{loc} {text}")
+        return RETRIEVAL_PROMPT.format(
+            passages="\n\n".join(passages) or "(no passages retrieved)",
+            hypothesis=hypothesis,
+        )
 
     @staticmethod
     def system_prompt() -> str:
