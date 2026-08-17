@@ -74,10 +74,12 @@ def ingest_corpus_dir(
     max_chars: int = 600,
     doc_subset: str | None = None,
     max_files: int | None = None,
+    file_list: list[str] | None = None,
 ) -> dict:
     """把 corpus/<benchmark>/*.txt 原样入库并分配到会话。
 
     root: LegalBenchRAG 根目录（含 corpus/）。benchmark: contractnli|cuad|maud|privacy_qa。
+    file_list: 只入库这些 corpus 相对路径（如 ["cuad/xxx.txt"]）——PAKTON 对齐时只入被引用文档。
     返回统计 {docs, chunks, elapsed_s, skipped}。
     """
     from src.document.embedder import embed_texts
@@ -91,6 +93,9 @@ def ingest_corpus_dir(
     files = sorted(p for p in corpus_dir.iterdir() if p.suffix.lower() == ".txt")
     if doc_subset:
         files = [p for p in files if doc_subset in p.name]
+    if file_list:
+        wanted = {f"{benchmark}/{p.name}" for p in files} & set(file_list)
+        files = [p for p in files if f"{benchmark}/{p.name}" in wanted]
     if max_files:
         files = files[:max_files]
     if not files:
@@ -184,6 +189,7 @@ def ingest_contractnli_jsonl(
     max_chars: int = 600,
     max_contracts: int | None = None,
     subsets: list[str] | None = None,
+    idx_subset: list[str] | None = None,
 ) -> dict:
     """把 ContractNLI 的 distinct 合同（前提）整库入库（供检索式分类评测）。
 
@@ -192,6 +198,7 @@ def ingest_contractnli_jsonl(
     - chunk 用 split_text_spans 对齐 raw 偏移，回填 search_tokens；
     - 可选 bge-m3 embedding（embed=False 时退化为 BM25-only）。
 
+    idx_subset: 只入库这些 premise_id（对齐 PAKTON：只入被采样实例引用的合同）。
     注意：默认**不**执行，需显式调用/CLI（评测里也只在 --ingest-nli 时入库）。
     """
     from src.document.embedder import embed_texts
@@ -200,6 +207,9 @@ def ingest_contractnli_jsonl(
     from src.contract.eval import loaders as L
 
     premises = L.load_contractnli_premises(Path(jsonl_path), subsets=subsets)
+    if idx_subset:
+        wanted = set(idx_subset)
+        premises = [p for p in premises if p["idx"] in wanted]
     if max_contracts:
         premises = premises[:max_contracts]
     if not premises:

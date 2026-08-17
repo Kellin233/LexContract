@@ -1,0 +1,863 @@
+{
+  "mode": "contractnli",
+  "subset": "test",
+  "total": 150,
+  "seed": 42,
+  "label_counts": {
+    "contradiction": 220,
+    "entailment": 968,
+    "neutral": 903
+  },
+  "label_counts_sampled": {
+    "contradiction": 16,
+    "entailment": 69,
+    "neutral": 65
+  },
+  "label_proportions_orig": {
+    "contradiction": 0.1052,
+    "entailment": 0.4629,
+    "neutral": 0.4319
+  },
+  "instances": [
+    {
+      "instance_id": "contractnli-test-518-4",
+      "premise_id": "518",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-581-4",
+      "premise_id": "581",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-544-5",
+      "premise_id": "544",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-519-11",
+      "premise_id": "519",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-513-4",
+      "premise_id": "513",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-537-4",
+      "premise_id": "537",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-588-4",
+      "premise_id": "588",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-574-16",
+      "premise_id": "574",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-503-12",
+      "premise_id": "503",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-535-4",
+      "premise_id": "535",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-490-4",
+      "premise_id": "490",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-554-12",
+      "premise_id": "554",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-484-5",
+      "premise_id": "484",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-522-11",
+      "premise_id": "522",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-604-11",
+      "premise_id": "604",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-538-12",
+      "premise_id": "538",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-539-1",
+      "premise_id": "539",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-539-14",
+      "premise_id": "539",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-513-3",
+      "premise_id": "513",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-574-2",
+      "premise_id": "574",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-588-13",
+      "premise_id": "588",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-493-7",
+      "premise_id": "493",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-594-7",
+      "premise_id": "594",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-519-15",
+      "premise_id": "519",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-592-13",
+      "premise_id": "592",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-585-11",
+      "premise_id": "585",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-510-16",
+      "premise_id": "510",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-540-7",
+      "premise_id": "540",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-497-11",
+      "premise_id": "497",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-571-2",
+      "premise_id": "571",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-605-11",
+      "premise_id": "605",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-565-3",
+      "premise_id": "565",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-595-8",
+      "premise_id": "595",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-508-16",
+      "premise_id": "508",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-569-5",
+      "premise_id": "569",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-502-11",
+      "premise_id": "502",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-542-7",
+      "premise_id": "542",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-584-8",
+      "premise_id": "584",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-527-13",
+      "premise_id": "527",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-598-7",
+      "premise_id": "598",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-591-14",
+      "premise_id": "591",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-504-6",
+      "premise_id": "504",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-536-16",
+      "premise_id": "536",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-596-8",
+      "premise_id": "596",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-504-16",
+      "premise_id": "504",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-557-9",
+      "premise_id": "557",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-553-9",
+      "premise_id": "553",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-521-16",
+      "premise_id": "521",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-495-2",
+      "premise_id": "495",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-508-14",
+      "premise_id": "508",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-574-7",
+      "premise_id": "574",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-564-13",
+      "premise_id": "564",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-567-14",
+      "premise_id": "567",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-571-14",
+      "premise_id": "571",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-513-13",
+      "premise_id": "513",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-514-16",
+      "premise_id": "514",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-585-10",
+      "premise_id": "585",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-495-3",
+      "premise_id": "495",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-547-3",
+      "premise_id": "547",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-600-13",
+      "premise_id": "600",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-539-2",
+      "premise_id": "539",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-592-11",
+      "premise_id": "592",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-504-11",
+      "premise_id": "504",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-484-15",
+      "premise_id": "484",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-565-11",
+      "premise_id": "565",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-509-2",
+      "premise_id": "509",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-564-7",
+      "premise_id": "564",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-530-11",
+      "premise_id": "530",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-549-16",
+      "premise_id": "549",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-545-13",
+      "premise_id": "545",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-517-16",
+      "premise_id": "517",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-558-15",
+      "premise_id": "558",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-522-9",
+      "premise_id": "522",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-521-7",
+      "premise_id": "521",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-485-9",
+      "premise_id": "485",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-537-14",
+      "premise_id": "537",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-515-11",
+      "premise_id": "515",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-578-13",
+      "premise_id": "578",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-492-11",
+      "premise_id": "492",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-571-8",
+      "premise_id": "571",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-587-7",
+      "premise_id": "587",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-538-10",
+      "premise_id": "538",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-537-13",
+      "premise_id": "537",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-584-7",
+      "premise_id": "584",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-497-15",
+      "premise_id": "497",
+      "label": "entailment"
+    },
+    {
+      "instance_id": "contractnli-test-550-12",
+      "premise_id": "550",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-530-5",
+      "premise_id": "530",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-512-0",
+      "premise_id": "512",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-487-5",
+      "premise_id": "487",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-568-15",
+      "premise_id": "568",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-566-0",
+      "premise_id": "566",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-486-0",
+      "premise_id": "486",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-491-5",
+      "premise_id": "491",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-572-12",
+      "premise_id": "572",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-532-7",
+      "premise_id": "532",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-499-10",
+      "premise_id": "499",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-531-5",
+      "premise_id": "531",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-517-1",
+      "premise_id": "517",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-578-0",
+      "premise_id": "578",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-578-12",
+      "premise_id": "578",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-517-11",
+      "premise_id": "517",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-578-7",
+      "premise_id": "578",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-531-10",
+      "premise_id": "531",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-605-1",
+      "premise_id": "605",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-570-11",
+      "premise_id": "570",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-512-8",
+      "premise_id": "512",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-550-7",
+      "premise_id": "550",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-509-1",
+      "premise_id": "509",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-544-7",
+      "premise_id": "544",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-528-7",
+      "premise_id": "528",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-491-2",
+      "premise_id": "491",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-566-11",
+      "premise_id": "566",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-500-8",
+      "premise_id": "500",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-579-9",
+      "premise_id": "579",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-549-10",
+      "premise_id": "549",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-561-4",
+      "premise_id": "561",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-531-1",
+      "premise_id": "531",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-569-3",
+      "premise_id": "569",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-597-2",
+      "premise_id": "597",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-602-12",
+      "premise_id": "602",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-556-2",
+      "premise_id": "556",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-501-8",
+      "premise_id": "501",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-489-12",
+      "premise_id": "489",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-529-15",
+      "premise_id": "529",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-526-0",
+      "premise_id": "526",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-503-10",
+      "premise_id": "503",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-497-1",
+      "premise_id": "497",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-564-4",
+      "premise_id": "564",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-556-13",
+      "premise_id": "556",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-576-1",
+      "premise_id": "576",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-491-0",
+      "premise_id": "491",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-493-1",
+      "premise_id": "493",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-565-1",
+      "premise_id": "565",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-487-8",
+      "premise_id": "487",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-589-0",
+      "premise_id": "589",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-548-12",
+      "premise_id": "548",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-492-1",
+      "premise_id": "492",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-541-3",
+      "premise_id": "541",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-532-8",
+      "premise_id": "532",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-528-0",
+      "premise_id": "528",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-544-0",
+      "premise_id": "544",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-573-0",
+      "premise_id": "573",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-497-10",
+      "premise_id": "497",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-600-0",
+      "premise_id": "600",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-534-0",
+      "premise_id": "534",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-602-0",
+      "premise_id": "602",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-589-11",
+      "premise_id": "589",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-539-12",
+      "premise_id": "539",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-532-9",
+      "premise_id": "532",
+      "label": "neutral"
+    },
+    {
+      "instance_id": "contractnli-test-561-7",
+      "premise_id": "561",
+      "label": "neutral"
+    }
+  ],
+  "contracts": [
+    "484",
+    "485",
+    "486",
+    "487",
+    "489",
+    "490",
+    "491",
+    "492",
+    "493",
+    "495",
+    "497",
+    "499",
+    "500",
+    "501",
+    "502",
+    "503",
+    "504",
+    "508",
+    "509",
+    "510",
+    "512",
+    "513",
+    "514",
+    "515",
+    "517",
+    "518",
+    "519",
+    "521",
+    "522",
+    "526",
+    "527",
+    "528",
+    "529",
+    "530",
+    "531",
+    "532",
+    "534",
+    "535",
+    "536",
+    "537",
+    "538",
+    "539",
+    "540",
+    "541",
+    "542",
+    "544",
+    "545",
+    "547",
+    "548",
+    "549",
+    "550",
+    "553",
+    "554",
+    "556",
+    "557",
+    "558",
+    "561",
+    "564",
+    "565",
+    "566",
+    "567",
+    "568",
+    "569",
+    "570",
+    "571",
+    "572",
+    "573",
+    "574",
+    "576",
+    "578",
+    "579",
+    "581",
+    "584",
+    "585",
+    "587",
+    "588",
+    "589",
+    "591",
+    "592",
+    "594",
+    "595",
+    "596",
+    "597",
+    "598",
+    "600",
+    "602",
+    "604",
+    "605"
+  ]
+}

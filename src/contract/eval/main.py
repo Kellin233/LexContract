@@ -66,6 +66,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="ContractNLI 检索式下每条的检索条款数（默认 8）")
     p.add_argument("--ingest-nli", action="store_true",
                    help="ContractNLI 会话为空时允许自动入库 distinct 合同（默认禁止）")
+    p.add_argument("--request-set", default=None,
+                   help="预先生成的请求/入库集合 JSON（sampling 模块产物）；只跑其中列出的请求")
     p.add_argument("--seed", type=int, default=None, help="抽样种子")
     p.add_argument("--session", default=None,
                    help="覆盖所有 benchmark 的数据库会话（单 benchmark 调试用）")
@@ -97,6 +99,23 @@ def _init_modules() -> dict:
     from src.core.runner import initialize_modules, load_config
 
     return initialize_modules(load_config(None), session_id="eval")
+
+
+def _load_request_set(args: argparse.Namespace, mode: str) -> dict | None:
+    """读取 pre-generated 请求/入库集合（仅当文件存在且 mode 匹配）。"""
+    if not args.request_set:
+        return None
+    import json as _json
+
+    try:
+        data = _json.loads(Path(args.request_set).read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[eval] 请求集合读取失败 {args.request_set}: {e}")
+        raise SystemExit(1) from e
+    if data.get("mode") != mode:
+        print(f"[eval] 请求集合 mode={data.get('mode')} 与本评测 mode={mode} 不匹配")
+        raise SystemExit(1)
+    return data
 
 
 def _resolve_ks(args: argparse.Namespace, eval_cfg: dict) -> list[int]:
@@ -164,6 +183,15 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
     out_dir = Path(args.out or eval_cfg["out_dir"])
     run_dir = make_run_dir(out_dir, "legalbenchrag")
 
+    # 可选的预生成请求集合（sampling 模块产物）：只跑其中列出的请求 / 只入被引用文档
+    request_set = _load_request_set(args, "legalbenchrag")
+    request_queries: dict[str, set[str]] = {}
+    request_docs: dict[str, list[str]] = {}
+    if request_set:
+        for b, info in (request_set.get("samples", {}) or {}).items():
+            request_queries[b] = set(info.get("queries", []))
+            request_docs[b] = list(info.get("doc_ids", []))
+
     per_benchmark: dict = {}
     overall: dict[str, list[float]] = {}
     n_instances = n_errors = n_resumed = 0
@@ -171,6 +199,9 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
     for name in names:
         session = args.session or sessions_cfg.get(name, f"lb-{name}")
         print(f"\n=== [legalbenchrag] benchmark={name} session={session} ===")
+        file_list = request_docs.get(name) if request_set else None
+        if file_list:
+            print(f"  [ingest] 仅入库被采样请求引用的 {len(file_list)} 个文档（PAKTON 对齐）")
         if _session_doc_count(session) == 0:
             if args.no_ingest:
                 print(f"  [错误] session {session} 无文档且禁用了自动入库；"
@@ -178,12 +209,15 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
                 per_benchmark[name] = {"error": "no docs in session"}
                 continue
             print(f"  [ingest] 会话 {session} 为空，原样入库 corpus/{name} ...")
-            ingest_corpus_dir(root, name, session, embed=bool(eval_cfg.get("embedding_corpus", True)))
+            ingest_corpus_dir(root, name, session, embed=bool(eval_cfg.get("embedding_corpus", True)),
+                              file_list=file_list)
         print(f"  [ingest] 会话 {session} 文档数 = {_session_doc_count(session)}")
 
         records_path = run_dir / f"{name}.jsonl"
         done = load_done_ids(records_path)
         queries = L.load_legalbench_queries(root, name)
+        if name in request_queries:
+            queries = [q for q in queries if str(q.get("instance_id", "")) in request_queries[name]]
         pending = [q for q in queries if str(q.get("instance_id", "")) not in done]
         n_resumed += len(queries) - len(pending)
         print(f"  [queries] 总 {len(queries)}，已完成 {len(queries) - len(pending)}，本次将处理 {len(pending)}"
@@ -286,7 +320,18 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
 
     planner = Planner(policy=planner_policy)
     path = L.find_contractnli_jsonl(args.contractnli_jsonl)
+
+    # 可选的预生成请求集合（sampling 模块产物）：只跑列出的实例 / 只入被引用的合同
+    request_set = _load_request_set(args, "contractnli")
+    request_ids: set[str] = set()
+    idx_subset: list[str] | None = None
+    if request_set:
+        request_ids = {inst["instance_id"] for inst in request_set.get("instances", [])}
+        idx_subset = list(request_set.get("contracts", []))
+
     records = L.load_contractnli_records(path, subset=args.subset)
+    if request_ids:
+        records = [r for r in records if str(r.get("instance_id", "")) in request_ids]
     if not records:
         print(f"[contractnli] 没有可评测的实例（subset={args.subset!r}）")
         return 1
@@ -299,9 +344,12 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         n_docs = _session_doc_count(nli_session)
         if n_docs == 0:
             if args.ingest_nli:
-                print(f"[contractnli] 会话 {nli_session} 为空，自动入库 {len(records)} 条实例涉及的 distinct 合同 ...")
+                print(f"[contractnli] 会话 {nli_session} 为空，自动入库 "
+                      + (f"{len(idx_subset)} 份被采样实例引用的合同（PAKTON 对齐）" if idx_subset else "distinct 合同")
+                      + " ...")
                 from src.contract.eval.ingest_raw import ingest_contractnli_jsonl
-                ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)))
+                ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)),
+                                         idx_subset=idx_subset)
             else:
                 print(f"[contractnli] 会话 {nli_session} 无合同入库（indexed 模式需要全库）。")
                 print("  请先手动入库（不会自动执行）:  python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl/zip> --session " + nli_session)
