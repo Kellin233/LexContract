@@ -119,6 +119,10 @@ class RefinerResult(BaseModel):
 
     conclusion: str = Field(default="", description="总结论（一两段）")
     points: list[RefinerPoint] = Field(default_factory=list, description="分点结论")
+    # 最支持最终结论的证据（可能等于全部，也可能只是其中一部分）
+    # —— Refiner 负责“筛选最相关证据”，引用/依据仅落到这组证据上。
+    supporting_evidence_ids: list[str] = Field(default_factory=list,
+                                               description="最支持最终结论的证据 ID（可能为全部或部分，须真实存在）")
     evidence_gap: list[str] = Field(default_factory=list, description="当前文档中未能确认的缺口")
     citations: list[Citation] = Field(default_factory=list)
     final_status: FinalStatus = FinalStatus.PARTIALLY_SUFFICIENT

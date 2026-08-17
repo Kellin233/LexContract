@@ -23,14 +23,16 @@ RULES:
 1. Cite evidence ONLY by its ID in brackets, e.g. [E001][E002]. NEVER invent article numbers like 第13.2条 that are not backed by an evidence ID.
 2. Every claim in `points` must be supported by at least one real evidence ID from the given list.
 3. Reasoning across clauses is allowed and expected (main rule + exception, initial term vs renewal term, cross-references).
-4. If evidence is insufficient (status PARTIALLY_SUFFICIENT), explicitly state in `evidence_gap` what cannot be confirmed from this document set. Do NOT hallucinate to fill gaps.
-5. `conclusion` is a 1-2 paragraph overall answer to the original question.
-6. `points` are the supporting breakdown, each with the evidence IDs that back it.
+4. Select `supporting_evidence_ids`: the evidence that MOST supports your conclusion. Choose only what you actually relied upon — this may be ALL of them, or only a SUBSET. Do not just dump every piece of evidence; pick the most relevant/supportive ones.
+5. If evidence is insufficient (status PARTIALLY_SUFFICIENT), explicitly state in `evidence_gap` what cannot be confirmed from this document set. Do NOT hallucinate to fill gaps.
+6. `conclusion` is a 1-2 paragraph overall answer to the original question.
+7. `points` are the supporting breakdown, each with the evidence IDs that back it.
 
 Output STRICT JSON only:
 {{
   "conclusion": "总结论",
   "points": [{{"claim": "分点结论", "evidence_ids": ["E001", "E002"]}}],
+  "supporting_evidence_ids": ["E001", "E003"],
   "evidence_gap": ["未能确认的缺口"],
   "notes": "补充说明"
 }}
@@ -70,6 +72,11 @@ class Refiner:
         # 过滤不存在的证据 ID，避免引用幻觉
         used_ids = [eid for eid in used_ids if eid in existing]
 
+        # “最支持结论的证据”：优先取模型显式选中的子集；若缺失/为空，退化为分点引用并集
+        supporting = [eid for eid in (data.get("supporting_evidence_ids") or []) if eid in existing]
+        if not supporting:
+            supporting = used_ids
+
         result = RefinerResult(
             conclusion=str(data.get("conclusion", "")),
             points=[
@@ -79,11 +86,13 @@ class Refiner:
                 )
                 for p in (data.get("points") or [])
             ],
+            supporting_evidence_ids=supporting,
             evidence_gap=[str(g) for g in (data.get("evidence_gap") or [])],
             notes=str(data.get("notes", "")),
             final_status=final_status,
         )
-        result.citations = self._build_citations(used_ids, store)
+        # 依据仅落在“最支持结论的证据”子集上（可能是全部，也可能只是一部分）
+        result.citations = self._build_citations(supporting, store)
         result.markdown_body = render_markdown(state.original_question, result)
         return result
 
@@ -107,7 +116,8 @@ class Refiner:
                   final_status: FinalStatus, reason: str) -> RefinerResult:
         """LLM 失败时用全部证据拼一个最小报告，保证有输出。"""
         result = RefinerResult(
-            conclusion=f"（Refiner 生成失败，原因：{reason}。以下仅列出已收集证据，未做综合结论。）",
+            conclusion=f"（Refiner 生成失败，原因：{reason}。以下仅列出支撑证据，未做综合结论。）",
+            supporting_evidence_ids=store.all_ids(),
             evidence_gap=["当前未能生成综合结论，请结合下方证据自行判断。"],
             notes=reason,
             final_status=final_status,
@@ -155,7 +165,7 @@ def render_markdown(question: str, result: RefinerResult) -> str:
             lines.append(f"{i}. {p.claim} {refs}")
     else:
         lines.append("（无分点）")
-    lines += ["", "## 依据（原文条款）"]
+    lines += ["", "## 最支持结论的证据（可能为全部，也可能只列一部分）"]
     if result.citations:
         for c in result.citations:
             loc = f"{c.doc_title}"
