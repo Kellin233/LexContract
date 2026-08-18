@@ -227,6 +227,11 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
         if name in request_queries:
             queries = [q for q in queries if str(q.get("instance_id", "")) in request_queries[name]]
         pending = [q for q in queries if str(q.get("instance_id", "")) not in done]
+        if not pending and not records_path.exists():
+            # 请求集过滤后该 benchmark 无实例（如 10% 抽取向下取整为 0）：
+            # 不生成记录也不参与整体汇总，避免 summarize 读不存在的文件
+            print(f"  [queries] 请求集过滤后 {name} 无实例，跳过")
+            continue
         n_resumed += len(queries) - len(pending)
         print(f"  [queries] 总 {len(queries)}，已完成 {len(queries) - len(pending)}，本次将处理 {len(pending)}"
               + (f"，agent 抽样 {agent_limit}" if agent_limit else "")

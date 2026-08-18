@@ -161,8 +161,9 @@ def load_legalbench_queries(root: Path, name: str) -> list[dict]:
     return out
 
 
-def corpus_text(root: Path, file_path: str) -> str:
+def corpus_text(root, file_path: str) -> str:
     """按 legalbenchrag 相同方式读取语料原文（文本模式 → 统一换行），保证偏移一致。"""
+    root = Path(root)
     p = root / "corpus" / file_path
     return p.read_text(encoding="utf-8", errors="replace")
 

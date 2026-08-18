@@ -32,12 +32,23 @@ def dim() -> int:
         return config.EMBED_DIM
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """对一批文本生成向量，返回归一化浮点列表。"""
+def embed_texts(texts: list[str], *, batch_size: int = 8) -> list[list[float]]:
+    """对一批文本生成向量，返回归一化浮点列表。
+
+    batch_size 默认 8：sentence-transformers 会把整批 padding 到该批最长序列，
+    批过大（如 32 × 500 token）会让单次前向序列膨胀，在 WSL2 8GB 显存上曾触发
+    OOM（dxg 驱动 -12），并连带把 CUDA 上下文带崩导致整进程卡死；取偏小的批以
+    换取稳定。
+    """
     if not texts:
         return []
     model = _model()
-    vecs = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+    vecs = model.encode(
+        texts,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        batch_size=int(batch_size),
+    )
     return [v.tolist() for v in vecs]
 
 
