@@ -20,7 +20,7 @@ SYSTEM_PROMPT = """\
 You are the final contract-analysis synthesizer. You have the user's question and a set of VERIFIED original contract clauses (evidence). Produce the final answer.
 
 RULES:
-1. Cite evidence ONLY by its ID in brackets, e.g. [E001][E002]. NEVER invent article numbers like 第13.2条 that are not backed by an evidence ID.
+1. Cite evidence ONLY by its ID in brackets, e.g. [E001][E002]. NEVER invent article numbers like "Article 13.2" that are not backed by an evidence ID.
 2. Every claim in `points` must be supported by at least one real evidence ID from the given list.
 3. Reasoning across clauses is allowed and expected (main rule + exception, initial term vs renewal term, cross-references).
 4. Select `supporting_evidence_ids`: the evidence that MOST supports your conclusion. Choose only what you actually relied upon — this may be ALL of them, or only a SUBSET. Do not just dump every piece of evidence; pick the most relevant/supportive ones.
@@ -30,11 +30,11 @@ RULES:
 
 Output STRICT JSON only:
 {{
-  "conclusion": "总结论",
-  "points": [{{"claim": "分点结论", "evidence_ids": ["E001", "E002"]}}],
+  "conclusion": "overall conclusion",
+  "points": [{{"claim": "supporting point", "evidence_ids": ["E001", "E002"]}}],
   "supporting_evidence_ids": ["E001", "E003"],
-  "evidence_gap": ["未能确认的缺口"],
-  "notes": "补充说明"
+  "evidence_gap": ["what could not be confirmed"],
+  "notes": "additional notes"
 }}
 ONLY the JSON object, no prose."""
 
@@ -128,19 +128,19 @@ class Refiner:
 
     def _build_prompt(self, state: ResearchState, store: EvidenceStore, final_status: FinalStatus) -> str:
         lines = [
-            f"## 原始问题\n{state.original_question}",
-            f"## 证据状态\n{final_status.value}"
-            + ("（证据被判定为足够）" if final_status == FinalStatus.SUFFICIENT else "（证据不足/达轮次上限，请如实说明缺失）"),
+            f"## Original question\n{state.original_question}",
+            f"## Evidence status\n{final_status.value}"
+            + (" (evidence judged sufficient)" if final_status == FinalStatus.SUFFICIENT else " (insufficient evidence / iteration limit reached; state the gaps honestly)"),
             "",
-            "## 已校验证据（全文）",
+            "## Verified evidence (full text)",
         ]
         for ev in store.all():
-            label = _section_label(ev) or "(未标章节)"
+            label = _section_label(ev) or "(no section)"
             lines.append(
-                f"\n### {ev.evidence_id}《{ev.document_name}》[{label}] 页{ev.page_no}\n"
+                f"\n### {ev.evidence_id} Document \"{ev.document_name}\" [{label}] page {ev.page_no}\n"
                 f"{ev.quote}"
             )
-        lines.append("\n请基于以上证据生成最终答案（严格 JSON）。")
+        lines.append("\nPlease produce the final answer based on the evidence above (strict JSON).")
         return "\n".join(lines)
 
 

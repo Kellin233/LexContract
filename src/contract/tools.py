@@ -333,14 +333,15 @@ class DocumentToolkit:
             DocumentTool(
                 name="search",
                 description=(
-                    "合同文档检索：按语义/关键词返回相关切片。第一个用于大多数调查问题。"
+                    "Contract document search: returns relevant passages by semantics/keywords. "
+                    "Use this first for most investigation questions."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "检索查询（可用同义词）"},
-                        "mode": {"type": "string", "enum": ["hybrid", "vector", "bm25"], "description": "检索模式"},
-                        "top_k": {"type": "integer", "description": "返回候选数"},
+                        "query": {"type": "string", "description": "The search query (synonyms are allowed)"},
+                        "mode": {"type": "string", "enum": ["hybrid", "vector", "bm25"], "description": "Retrieval mode"},
+                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
                     },
                     "required": ["query"],
                 },
@@ -348,23 +349,23 @@ class DocumentToolkit:
             ),
             DocumentTool(
                 name="get_chunk",
-                description="按切片 ID 读取一个切片的原文与元数据。",
+                description="Reads the original text and metadata of a single chunk by its ID.",
                 parameters={
                     "type": "object",
-                    "properties": {"chunk_id": {"type": "string", "description": "切片 ID，如 doc1:3"}},
+                    "properties": {"chunk_id": {"type": "string", "description": "Chunk ID, e.g. doc1:3"}},
                     "required": ["chunk_id"],
                 },
                 handler=self.get_chunk,
             ),
             DocumentTool(
                 name="get_context",
-                description="读取某切片前后相邻切片，用于把被截断的内容扩展成完整条款。",
+                description="Reads the chunks adjacent to a given chunk, to expand a truncated passage into a complete clause.",
                 parameters={
                     "type": "object",
                     "properties": {
                         "chunk_id": {"type": "string"},
-                        "before": {"type": "integer", "description": "向前取几个切片"},
-                        "after": {"type": "integer", "description": "向后取几个切片"},
+                        "before": {"type": "integer", "description": "How many chunks to include before"},
+                        "after": {"type": "integer", "description": "How many chunks to include after"},
                     },
                     "required": ["chunk_id"],
                 },
@@ -372,12 +373,12 @@ class DocumentToolkit:
             ),
             DocumentTool(
                 name="get_section",
-                description="返回指定章节（如 ['第十二条', '12.3']）的完整连续原文。",
+                description="Returns the complete continuous original text of a section (e.g. ['Article 12', '12.3']).",
                 parameters={
                     "type": "object",
                     "properties": {
-                        "doc_id": {"type": "string", "description": "文档 ID（检索结果里可见）"},
-                        "section_path": {"type": "array", "items": {"type": "string"}, "description": "章节路径（标题文本列表）"},
+                        "doc_id": {"type": "string", "description": "Document ID (shown in search results)"},
+                        "section_path": {"type": "array", "items": {"type": "string"}, "description": "Section path (list of heading texts)"},
                     },
                     "required": ["doc_id", "section_path"],
                 },
@@ -385,7 +386,7 @@ class DocumentToolkit:
             ),
             DocumentTool(
                 name="get_document_outline",
-                description="返回文档目录（各章节路径与偏移），用于定位条款位置。",
+                description="Returns the document outline (section paths and offsets), to locate where a clause is.",
                 parameters={
                     "type": "object",
                     "properties": {"doc_id": {"type": "string"}},
@@ -395,12 +396,13 @@ class DocumentToolkit:
             ),
             DocumentTool(
                 name="get_referenced_section",
-                description="跟随条款间交叉引用，返回被引用章节的完整原文（如“除第14条外”传入第14条）。",
+                description="Follows a cross-reference between clauses and returns the full original text of the referenced section "
+                            '(e.g. pass "Article 14" for "except as provided in Article 14").',
                 parameters={
                     "type": "object",
                     "properties": {
                         "doc_id": {"type": "string"},
-                        "ref": {"type": "string", "description": '引用文本，如 "第14条" / "Article 4.2"'},
+                        "ref": {"type": "string", "description": 'Reference text, e.g. "Article 14" / "Article 4.2"'},
                     },
                     "required": ["doc_id", "ref"],
                 },

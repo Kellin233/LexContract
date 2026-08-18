@@ -36,9 +36,9 @@ You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to 
 
 CRITICAL RULES:
 1. NEVER interpret, judge, summarize, or reach conclusions about the contract. Only collect original text.
-2. Use the retrieval tools to find clauses. Start with `search` (try synonyms if nothing useful: e.g. 终止/解除/退出/单方解除/提前终止).
+2. Use the retrieval tools to find clauses. Start with `search` (try synonyms if nothing useful: e.g. termination / rescission / unilateral termination / early termination).
 3. When a hit is a fragment, use `get_context` to expand around it, or `get_section` to fetch the complete clause by section_path, or `get_document_outline` to locate where a clause is.
-4. Follow internal cross-references: if a clause says "除第X条规定外" / "except as provided in Article X", call `get_referenced_section` to also capture that section.
+4. Follow internal cross-references: if a clause says "except as provided in Article X" / "subject to Section X", call `get_referenced_section` to also capture that section.
 5. Collect ALL clauses that bear on the research question — do not stop at the first hit.
 6. You have a HARD BUDGET: at most 3 ROUNDS may issue `search` calls, and at most 3 `search` calls per such round. Choose search queries wisely (cover the key synonyms early); expansion via get_context/get_section and the final JSON reply do not count against search rounds.
 7. For each captured clause, report its precise offsets (use the start_offset/end_offset shown by `get_section` / chunks) and the source chunk ids.
@@ -49,10 +49,10 @@ FINAL OUTPUT FORMAT (must be the last assistant message, JSON only — an array,
     "doc_id": "...",
     "start_offset": 0,
     "end_offset": 0,
-    "section_path": ["第十二条"],
+    "section_path": ["Article 12"],
     "source_chunk_ids": ["doc-xxx:3"],
     "page_no": 1,
-    "relevance_note": "一句话说明该条款与本问题的关系（不作为引用）",
+    "relevance_note": "one sentence on why this clause is relevant to the question (not used as a citation)",
     "retrieval_score": 0.8
   }}
 ]
@@ -209,8 +209,8 @@ class Searcher(BaseAgent):
                     if tool_name == "search":
                         # 检索轮数（发 search 的轮）已用满：不再执行 search（允许 get_section 等继续）
                         if search_rounds_used >= MAX_SEARCH_ROUNDS:
-                            note = {"error": f"检索轮次已达上限 {MAX_SEARCH_ROUNDS} 轮，本条 search 已跳过 "
-                                             f"(可用 get_section/get_context 展开已有命中): "
+                            note = {"error": f"Search-round budget exhausted ({MAX_SEARCH_ROUNDS} rounds); this search was skipped "
+                                             f"(you may still use get_section/get_context to expand existing hits): "
                                              f"{str(args.get('query', ''))[:50]}"}
                             trajectory.append({"turn": turn, "role": "tool",
                                                "tool_call_id": tc.get("id", ""), "name": tool_name,
@@ -219,7 +219,7 @@ class Searcher(BaseAgent):
                             continue
                         # 单轮内 search 次数超限：不执行，回显提示
                         if turn_search_count >= MAX_SEARCHES_PER_ROUND:
-                            note = {"error": f"每轮最多 {MAX_SEARCHES_PER_ROUND} 个检索词，本条 search 已跳过: "
+                            note = {"error": f"At most {MAX_SEARCHES_PER_ROUND} search queries per round; this search was skipped: "
                                              f"{str(args.get('query', ''))[:50]}"}
                             trajectory.append({"turn": turn, "role": "tool",
                                                "tool_call_id": tc.get("id", ""), "name": tool_name,
@@ -321,7 +321,7 @@ class Searcher(BaseAgent):
 
     def _build_task_prompt(self, question: str, doc_hints: list[str], context: dict) -> str:
         lines = [
-            "## Research question to investigate（只用它来决定找哪些条款，不要在此回答它）",
+            "## Research question to investigate (use it only to decide which clauses to look for; do not answer it here)",
             question,
             "",
             "## Instructions",

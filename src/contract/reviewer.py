@@ -33,11 +33,11 @@ You must NOT:
 Output STRICT JSON only:
 {{
   "status": "SUFFICIENT" or "NEED_MORE",
-  "covered_aspects": ["已覆盖的方面"],
-  "missing_aspects": [{{"description": "还缺什么", "reason": "为什么需要（挂回原问题）"}}],
-  "conflicts": [{{"evidence_a_id": "E001", "evidence_b_id": "E002", "summary": "冲突的客观描述"}}],
-  "keep_evidence_ids": ["保留的证据ID"],
-  "notes": "补充说明"
+  "covered_aspects": ["aspects already covered"],
+  "missing_aspects": [{{"description": "what is still missing", "reason": "why it is needed (tie back to the question)"}}],
+  "conflicts": [{{"evidence_a_id": "E001", "evidence_b_id": "E002", "summary": "objective description of the conflict"}}],
+  "keep_evidence_ids": ["evidence IDs to keep"],
+  "notes": "additional notes"
 }}
 ONLY the JSON object, no prose."""
 
@@ -104,7 +104,7 @@ class Reviewer:
     # ------------------------------------------------------------------
     def _fallback(self, state: ResearchState, previous: ReviewResult | None) -> ReviewResult:
         """LLM 解析失败时的保守降级：沿用上一轮缺失项或视为 NEED_MORE。"""
-        result = ReviewResult(status=ReviewStatus.NEED_MORE, notes="Reviewer LLM 输出解析失败，保守判定 NEED_MORE。")
+        result = ReviewResult(status=ReviewStatus.NEED_MORE, notes="Reviewer LLM output could not be parsed; conservatively marked NEED_MORE.")
         if previous is not None:
             result.missing_aspects = list(previous.missing_aspects)
         result.effective_new_evidence = False
@@ -124,31 +124,31 @@ class Reviewer:
 
     def _build_prompt(self, state: ResearchState, store: EvidenceStore, previous: ReviewResult | None) -> str:
         lines = [
-            f"## 原始问题\n{state.original_question}",
+            f"## Original question\n{state.original_question}",
             "",
-            "## 调查问题",
+            "## Investigation questions",
         ]
         for q in state.questions:
             lines.append(f"- {q.question_id}: {q.question}")
-        lines += ["", "## 已收集证据（EvidenceStore）"]
+        lines += ["", "## Evidence collected (EvidenceStore)"]
         all_evidence = store.all()
         if not all_evidence:
-            lines.append("（尚无证据）")
+            lines.append("(no evidence yet)")
         for ev in all_evidence:
             label = _section_label(ev)
             snippet = ev.quote[:150].replace("\n", " ")
             lines.append(
-                f"- {ev.evidence_id}: 《{ev.document_name}》[{label}] 页{ev.page_no} —— "
-                f"{snippet} （{ev.relevance_note[:80]}）"
+                f"- {ev.evidence_id}: Document \"{ev.document_name}\" [{label}] page {ev.page_no} — "
+                f"{snippet} ({ev.relevance_note[:80]})"
             )
-        lines += ["", "## 上一轮审查（仅作上下文）"]
+        lines += ["", "## Previous review (context only)"]
         if previous is not None:
             lines.append(
-                f"status={previous.status.value}，missing={[m.description for m in previous.missing_aspects]}，"
+                f"status={previous.status.value}, missing={[m.description for m in previous.missing_aspects]}, "
                 f"conflicts={[c.evidence_a_id+' vs '+c.evidence_b_id for c in previous.conflicts]}"
             )
         else:
-            lines.append("（无）")
+            lines.append("(none)")
         lines.append("")
-        lines.append("请仅评估覆盖度/冲突/缺口，输出严格 JSON。")
+        lines.append("Please evaluate only coverage / conflicts / gaps, and output strict JSON.")
         return "\n".join(lines)

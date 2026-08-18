@@ -26,63 +26,63 @@ class PlanParseError(Exception):
 
 
 INITIAL_PLAN_PROMPT = """\
-你是一名合同条款调查规划员。请把用户的原始问题拆解为若干个“需要调查的要点”（research questions）。
+You are a contract-clause investigation planner. Break the user's original question down into several "research points" (research questions) that need to be investigated.
 
-## 原始问题
+## Original question
 {question}
 
-## 输出格式（只输出 JSON，无多余文字）
+## Output format (JSON only, no extra text)
 {{
   "research_questions": [
     {{
       "question_id": "Q1",
-      "question": "调查目标（只描述需要去合同里找什么，绝不包含结论）",
-      "doc_hints": ["关键词1", "关键词2"]
+      "question": "Investigation goal (describe only what to look for in the contract, never include a conclusion)",
+      "doc_hints": ["keyword1", "keyword2"]
     }}
   ]
 }}
 
-## 规则
-1. 每个要点只描述“需要调查什么”，例如“查找乙方主动提前终止的通知期限条款”，不要写“乙方可以提前终止/不可以提前终止”这类结论。
-2. 一个问题往往要同时结合多个章节才能回答，因此要点应覆盖所有相关角度（正反情形、例外、交叉引用、后续义务等）。
-3. 每轮最多生成 3 个要点；要点必须与原始问题直接相关，优先覆盖最重要的角度。
-4. 不要生成重复要点。
-5. doc_hints 使用合同原文常见的术语（如“终止”“解除”“单方解除”“提前终止”“不可抗力”“违约责任”“通知期限”）。""" 
+## Rules
+1. Each point describes only "what to investigate"; e.g. "find the notice-period clause for the receiving party's unilateral early termination" — never write conclusions like "the receiving party may / may not terminate early".
+2. A single question often requires combining several clauses to answer, so points should cover all relevant angles (both sides of an issue, exceptions, cross-references, post-termination obligations, etc.).
+3. Generate at most 3 points per call; each point must be directly relevant to the original question, prioritizing the most important angles.
+4. Do not generate duplicate points.
+5. doc_hints should use terms commonly found in the contract text (e.g. "termination", "unilateral termination", "early termination", "force majeure", "breach of contract", "notice period").""" 
 
 INCREMENTAL_PLAN_PROMPT = """\
-你是一名合同条款调查规划员。前面几轮调查尚未覆盖全部要点，请你补充新的调查问题。
+You are a contract-clause investigation planner. Earlier rounds have not yet covered all points; please supplement with new investigation questions.
 
-## 原始问题
+## Original question
 {question}
 
-## 已完成的调查问题（不要再重复）
+## Completed investigation questions (do not repeat)
 {completed_questions}
 
-## 已收集的证据概要
+## Evidence collected so far (summary)
 {evidence_summary}
 
-## Reviewer 指出的缺失要点
+## Missing points reported by the Reviewer
 {missing_aspects}
 
-## 发现的冲突（仅作背景，不要用于覆盖缺失点）
+## Conflicts found (background only; do not use to cover missing points)
 {conflicts}
 
-## 输出格式（只输出 JSON，无多余文字）
+## Output format (JSON only, no extra text)
 {{
   "research_questions": [
     {{
       "question_id": "Q{n}",
-      "question": "针对缺失要点的调查目标（不含结论）",
-      "doc_hints": ["关键词"]
+      "question": "Investigation goal targeting the missing point (no conclusion)",
+      "doc_hints": ["keyword"]
     }}
   ]
 }}
 
-## 规则
-1. 只为缺失要点生成问题；与已有问题重复的不要生成。
-2. 每个问题仍只描述“需要调查什么”，不包含结论。
-3. question_id 从 Q{n} 开始连续编号。
-4. 每轮最多生成 3 个新的调查问题，不要为了凑数生成无关问题。"""
+## Rules
+1. Generate questions only for the missing points; do not repeat existing questions.
+2. Each question still describes only "what to investigate", without conclusions.
+3. question_id numbering continues sequentially from Q{n}.
+4. Generate at most 3 new investigation questions per call; do not pad with irrelevant questions."""
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -162,16 +162,16 @@ class Planner:
             f"- Q{q.question_id}: {q.question}"
             for q in state.questions
             if q.question_id in state.completed_question_ids or q.question_id in state.active_question_ids
-        ) or "（无）"
+        ) or "(none)"
         evidence_summary = self._evidence_summary(state)
         missing = "\n".join(
-            f"- {m.description}（原因：{m.reason}）"
+            f"- {m.description} (reason: {m.reason})"
             for m in state.missing_aspects
-        ) or "（无）"
+        ) or "(none)"
         conflicts = "\n".join(
-            f"- {c.summary}（E{c.evidence_a_id} vs E{c.evidence_b_id}）"
+            f"- {c.summary} (E{c.evidence_a_id} vs E{c.evidence_b_id})"
             for c in state.conflicts
-        ) or "（无）"
+        ) or "(none)"
 
         prompt = INCREMENTAL_PLAN_PROMPT.format(
             question=state.original_question,
@@ -189,7 +189,7 @@ class Planner:
         for i, m in enumerate(state.missing_aspects[:MAX_QUESTIONS_PER_CALL], start=next_seq):
             fallback.append(ResearchQuestion(
                 question_id=f"Q{i}",
-                question=f"查找与“{m.description}”相关的条款",
+                question=f"Find clauses relevant to: {m.description}",
                 doc_hints=[m.description[:20]],
             ))
         return fallback
@@ -201,8 +201,8 @@ class Planner:
         lines = []
         for qid in state.completed_question_ids:
             ids = state.evidence_by_question.get(qid, [])
-            lines.append(f"- {qid}: {len(ids)} 条证据")
-        return "\n".join(lines) or "（尚无证据）"
+            lines.append(f"- {qid}: {len(ids)} evidence items")
+        return "\n".join(lines) or "(no evidence yet)"
 
     def _call(self, prompt: str, start_seq: int = 1) -> list[ResearchQuestion]:
         messages = [
