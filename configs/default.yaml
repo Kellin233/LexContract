@@ -246,8 +246,11 @@ eval:
   # ---------------------------------------------------------------------------
   # 输出根目录（每个 run 会创建 <out>/<mode>/<时间戳>/）
   out_dir: "evaluation/runs"
-  # LegalBenchRAG 的 top-k 集合（Recall@k）
+  # 文档级 R@k 的 k 集合（本系统扩展指标：top-k 命中文档占比 + MRR）
   k: [1, 2, 4, 8, 16, 32, 64]
+  # 字符级 span 指标的 cutoff（官方 PAKTON 口径，主指标）：同一次检索结果按
+  # 排名截断为前 c 个 chunk 后与 gold 区间做字符重叠 P/R/F1；官方为 1/4/16/32/64
+  cutoffs: [1, 4, 16, 32, 64]
   # 每个 benchmark 用真实 LLM Searcher 参与评测的 query 抽样数
   #   None=全量 query 都跑 agent；0=只跑确定性部分；正整数=按 seed 抽样
   agent_limit: 20

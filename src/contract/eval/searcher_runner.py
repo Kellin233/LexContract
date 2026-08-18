@@ -33,6 +33,7 @@ def run_legalbench(
     benchmark: str,
     session_id: str,
     ks: list[int],
+    cutoffs: list[int],
     records_path: str | Path,
     make_searcher=None,
     agent_limit: int | None = None,
@@ -43,9 +44,15 @@ def run_legalbench(
 
     make_searcher: 可调用，返回一个已装配的 Searcher 实例。
     agent_limit: 参与 agent 评测的最大 query 数（None=全量，0=不跑 agent）。
+
+    指标分两套（避免混用）：
+    - 字符级（官方 PAKTON 口径，主指标）：span_{precision,recall,f1}_at_{c}，
+      c ∈ cutoffs（官方 1/4/16/32/64），同一次确定性检索结果按排名截断前 c 个
+      chunk 后与 gold 区间做字符重叠。
+    - 文档级（本系统扩展）：doc_recall_at_{k} / doc_mrr，top-k 命中文档占比。
     """
     adapter = LegalBenchAdapter(root, benchmark, session_id, doc_ids)
-    top_k = max(ks)
+    top_k = max(cutoffs)
 
     # 参与 agent 评测的 query：在全部未完成 query 里按 seed 采样，保证可复现 + 续跑
     agent_ids = {str(q.get("instance_id", "")) for q in queries}
@@ -62,7 +69,6 @@ def run_legalbench(
 
         ranked = adapter.deterministic_rank(query, top_k=top_k)
         ranked_files = adapter.ranked_files(ranked)
-        ranked_by_file = adapter.spans_by_file(ranked)
 
         record = LegalQueryRecord(
             instance_id=iid,
@@ -76,17 +82,19 @@ def run_legalbench(
                 for h in ranked
             ],
         )
-        # 文档级：Recall@k + MRR
+        # 文档级（本系统扩展）：Recall@k + MRR（top-k 命中文档占比）
         for k in ks:
-            record.scores[f"recall_at_{k}"] = M.recall_at_k(ranked_files, gold_docs, k)
-        record.scores["mrr"] = M.mrr(ranked_files, gold_docs)
-        # 字符区间：确定性 top-k 的覆盖率（参考口径）
-        rsp = M.span_precision_recall_f1(ranked_by_file, gold_spans)
-        record.scores.update({
-            "span_precision": rsp["precision"],
-            "span_recall": rsp["recall"],
-            "span_f1": rsp["f1"],
-        })
+            record.scores[f"doc_recall_at_{k}"] = M.recall_at_k(ranked_files, gold_docs, k)
+        record.scores["doc_mrr"] = M.mrr(ranked_files, gold_docs)
+        # 字符级（官方 PAKTON 口径，主指标）：同一次检索按排名截断前 c 个 chunk，
+        # 与 gold 区间做字符重叠 P/R/F1
+        for c in cutoffs:
+            rsp = M.span_precision_recall_f1(
+                adapter.spans_by_file(ranked[:c]), gold_spans
+            )
+            record.scores[f"span_precision_at_{c}"] = rsp["precision"]
+            record.scores[f"span_recall_at_{c}"] = rsp["recall"]
+            record.scores[f"span_f1_at_{c}"] = rsp["f1"]
 
         # Agent 部分：真实 Searcher（对抽中的 query）
         if do_agent and iid in agent_ids:
@@ -156,18 +164,25 @@ def json_safe_trajectory(result, worker) -> str:
     return "\n".join(out)
 
 
-def summarize_legalbench_records(records_path: str | Path, ks: list[int]) -> dict:
-    """从已持久化的 records.jsonl 计算一个 benchmark 的聚合计分（宏平均口径）。"""
+def summarize_legalbench_records(records_path: str | Path, ks: list[int], cutoffs: list[int]) -> dict:
+    """从已持久化的 records.jsonl 计算一个 benchmark 的聚合计分。
+
+    返回 {n_queries, n_agent, n_searcher_error, metrics(各指标在子任务内的均值),
+    all(各指标原始值列表), key_weights}。官方口径的"子任务等权 0.25"加权在
+    main.py 侧按 present benchmark 归一化后完成。
+    """
     import json as _json
 
     from .persist import load_done_ids
 
-    ks = list(ks)
-    stats = {f"recall_at_{k}": [] for k in ks}
-    stats["mrr"] = []
-    stats["span_precision"] = []
-    stats["span_recall"] = []
-    stats["span_f1"] = []
+    stats: dict[str, list[float]] = {}
+    for k in ks:
+        stats[f"doc_recall_at_{k}"] = []
+    stats["doc_mrr"] = []
+    for c in cutoffs:
+        stats[f"span_precision_at_{c}"] = []
+        stats[f"span_recall_at_{c}"] = []
+        stats[f"span_f1_at_{c}"] = []
     stats["agent_span_precision"] = []
     stats["agent_span_recall"] = []
     stats["agent_span_f1"] = []
@@ -188,10 +203,12 @@ def summarize_legalbench_records(records_path: str | Path, ks: list[int]) -> dic
                 n_agent += 1
             if rec.get("searcher_error"):
                 n_searcher_error += 1
+    n_queries = len(load_done_ids(records_path))
     return {
-        "n_queries": len(load_done_ids(records_path)),
+        "n_queries": n_queries,
         "n_agent": n_agent,
         "n_searcher_error": n_searcher_error,
         "metrics": {key: _mean(vals) for key, vals in stats.items() if vals},
         "all": {key: vals for key, vals in stats.items()},
+        "key_weights": {key: len(vals) for key, vals in stats.items()},
     }

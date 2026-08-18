@@ -91,6 +91,7 @@ def _load_eval_config(args: argparse.Namespace) -> dict:
     eval_cfg = dict(cfg.get("eval", {}) or {})
     eval_cfg.setdefault("out_dir", "evaluation/runs")
     eval_cfg.setdefault("k", M.default_ks())
+    eval_cfg.setdefault("cutoffs", M.official_cutoffs())
     eval_cfg.setdefault("agent_limit", 20)
     eval_cfg.setdefault("seed", 0)
     eval_cfg.setdefault("embedding_corpus", True)
@@ -125,6 +126,11 @@ def _resolve_ks(args: argparse.Namespace, eval_cfg: dict) -> list[int]:
     if args.k:
         return [int(x.strip()) for x in args.k.split(",") if x.strip()]
     return list(eval_cfg["k"])
+
+
+def _resolve_cutoffs(args: argparse.Namespace, eval_cfg: dict) -> list[int]:
+    """字符级 span 指标的 cutoff（官方 PAKTON：1/4/16/32/64）。"""
+    return list(eval_cfg.get("cutoffs", M.official_cutoffs()))
 
 
 def _seed(args: argparse.Namespace, eval_cfg: dict) -> int:
@@ -180,6 +186,7 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
         return 1
 
     ks = _resolve_ks(args, eval_cfg)
+    cutoffs = _resolve_cutoffs(args, eval_cfg)
     seed = _seed(args, eval_cfg)
     agent_limit = args.agent_limit if args.agent_limit is not None else eval_cfg.get("agent_limit")
     sessions_cfg = dict(eval_cfg.get("sessions", {}) or {})
@@ -201,7 +208,6 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             request_docs[b] = list(info.get("doc_ids", []))
 
     per_benchmark: dict = {}
-    overall: dict[str, list[float]] = {}
     n_instances = n_errors = n_resumed = 0
 
     for name in names:
@@ -244,12 +250,13 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             benchmark=name,
             session_id=session,
             ks=ks,
+            cutoffs=cutoffs,
             records_path=records_path,
             make_searcher=factory if (agent_limit is None or agent_limit > 0) else None,
             agent_limit=agent_limit,
             seed=seed,
         )
-        summ = summarize_legalbench_records(records_path, ks)
+        summ = summarize_legalbench_records(records_path, ks, cutoffs)
         per_benchmark[name] = {
             "n_queries": summ["n_queries"],
             "n_agent": summ["n_agent"],
@@ -259,27 +266,43 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
         n_instances += summ["n_queries"]
         n_errors += summ["n_searcher_error"]
         m = summ["metrics"]
-        print(f"  [recall@k] " + "  ".join(f"R@{k}={m.get(f'recall_at_{k}', 0):.3f}" for k in ks))
-        print(f"  [mrr] {m.get('mrr', 0):.3f}   [span_f1] {m.get('span_f1', 0):.3f}"
-              + (f"   [agent_span_f1] {m.get('agent_span_f1', 0):.3f}" if "agent_span_f1" in m else ""))
-        # 累加整体（等权宏平均）
-        for key, val in m.items():
-            overall.setdefault(key, []).append(val)
+        # 字符级（官方口径，主指标）：同一次检索按 cutoff 截断后的字符重叠 P/R/F1
+        print(f"  [span] " + "  ".join(
+            f"@{c}: R={m.get(f'span_recall_at_{c}', 0):.3f} "
+            f"P={m.get(f'span_precision_at_{c}', 0):.3f} "
+            f"F1={m.get(f'span_f1_at_{c}', 0):.3f}"
+            for c in cutoffs))
+        # 文档级（本系统扩展）：top-k 命中文档占比 + MRR
+        print(f"  [doc@k] " + "  ".join(f"R@{k}={m.get(f'doc_recall_at_{k}', 0):.3f}" for k in ks)
+              + f"  MRR={m.get('doc_mrr', 0):.3f}")
+        if "agent_span_f1" in m:
+            print(f"  [agent] agent_span_f1={m['agent_span_f1']:.3f}")
 
-    # 整体 = 各 benchmark 均值（无 agent 数据的维度跳过）
-    overall_metrics = {key: sum(vals) / len(vals) for key, vals in overall.items() if vals}
-    for m in per_benchmark.values():
-        if "error" in m:
-            overall_metrics = {}
+    # 整体聚合：官方口径 = Σ_bench (0.25 × 子任务内均值)，只对本次实际运行的
+    # benchmark 归一化（全量 4 个时严格等于官方 0.25 等权）
+    present = [b for b in per_benchmark if isinstance(per_benchmark[b], dict)
+               and "metrics" in per_benchmark[b]]
+    w_total = 0.25 * len(present)
+    overall_metrics: dict = {}
+    if present:
+        keys = set()
+        for b in present:
+            keys |= set(per_benchmark[b]["metrics"])
+        for key in keys:
+            vals = [per_benchmark[b]["metrics"].get(key) for b in present]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                overall_metrics[key] = sum(0.25 * v for v in vals) / w_total
 
-    _write_legalbench_outputs(run_dir, eval_cfg, ks, per_benchmark, overall_metrics,
-                              n_instances, n_errors, n_resumed, args)
+    _write_legalbench_outputs(run_dir, eval_cfg, ks, cutoffs, per_benchmark,
+                              overall_metrics, n_instances, n_errors, n_resumed, args)
     print(f"\n[legalbenchrag] 完成，输出目录: {run_dir}")
     return 0
 
 
 def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
-                              per_benchmark: dict, overall_metrics: dict,
+                              cutoffs: list[int], per_benchmark: dict,
+                              overall_metrics: dict,
                               n_instances: int, n_errors: int, n_resumed: int,
                               args: argparse.Namespace) -> None:
     started_at = now_iso()
@@ -288,11 +311,18 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
         "started_at": started_at,
         "finished_at": now_iso(),
         "config": {
-            "k": ks,
+            "k": ks,  # 文档级 R@k 的 k（本系统扩展）
+            "cutoffs": cutoffs,  # 字符级 span 指标 cutoff（官方 PAKTON 口径）
             "agent_limit": args.agent_limit,
             "seed": _seed(args, eval_cfg),
             "legalbench_root": str(args.legalbench_root),
             "benchmarks": list(per_benchmark),
+        },
+        "口径说明": {
+            "span_*_at_{c}": "字符级区间指标（官方 PAKTON 主口径）：同一次检索按排名截断前 c 个 chunk，与 gold 字符区间做重叠 P/R/F1",
+            "doc_recall_at_{k}/doc_mrr": "文档级指标（本系统扩展）：top-k 命中文档占比与 MRR",
+            "agent_span_*": "LLM Searcher 证据（恢复的完整条款）与 gold 区间的字符重叠（本系统扩展）",
+            "整体聚合": "overall = Σ_bench(0.25 × 子任务内均值)，对本次实际运行的 benchmark 归一化（全量 4 个子任务时严格等于官方 0.25 等权）",
         },
         "metrics": overall_metrics,
         "per_benchmark": per_benchmark,
@@ -304,9 +334,9 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
     write_json(run_dir / "summary.json", summary)
 
     # metrics.csv：宽表（每 benchmark 一行 + overall 一行）
-    metric_keys = [f"recall_at_{k}" for k in ks] + \
-        ["mrr", "span_precision", "span_recall", "span_f1",
-         "agent_span_precision", "agent_span_recall", "agent_span_f1"]
+    metric_keys = [f"doc_recall_at_{k}" for k in ks] + ["doc_mrr"] + \
+        [f"span_f1_at_{c}" for c in cutoffs] + \
+        ["agent_span_f1"]
     rows: list[dict] = []
     for name, info in per_benchmark.items():
         row = {"benchmark": name, "n": info.get("n_queries", 0),

@@ -20,14 +20,25 @@ __all__ = [
     "f1_weighted",
     "f1_per_class",
     "default_ks",
+    "official_cutoffs",
+    "OFFICIAL_CUTOFFS",
+    "DEFAULT_KS",
 ]
 
-# LegalBenchRAG 论文口径的 top-k 集合
+# LegalBenchRAG 官方（PAKTON）口径的 cutoff 集合：同一次检索结果截断为
+# 前 1/4/16/32/64 个 chunk，分别计算字符级 span 指标（无 k=2、k=8）。
+OFFICIAL_CUTOFFS = (1, 4, 16, 32, 64)
+
+# 本系统扩展的文档级 R@k 集合（与官方字符级口径区分：官方不做文档级指标）。
 DEFAULT_KS = [1, 2, 4, 8, 16, 32, 64]
 
 
 def default_ks() -> list[int]:
     return list(DEFAULT_KS)
+
+
+def official_cutoffs() -> list[int]:
+    return list(OFFICIAL_CUTOFFS)
 
 
 # ---------------------------------------------------------------------------
