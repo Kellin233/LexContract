@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🚀 DeepResearch Agent
+# 📜 LexContract — 合同证据链研究系统
 
-### *从复杂 Query 到结构化深度研究报告，全链路自动化*
+### *从合同文档到"可验证"的审查结论，全链路自动化*
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Async](https://img.shields.io/badge/Async-asyncio-orange.svg)](https://docs.python.org/3/library/asyncio.html)
 
@@ -12,382 +12,200 @@
 
 ---
 
-## 📖 项目背景
+## 📖 这是什么
 
-大语言模型在单一问答场景表现优异，但在**复杂深度研究任务**中面临三个核心挑战：
+LexContract 由一套通用 multi-agent 深度研究框架（原 DeepResearch Agent）**原地改造**而来，聚焦**合同 / 法律文档的证据链式研究**：针对一个问题，多个研究 Agent 只负责从合同库里收集"可引用的原始条款证据"，由唯一的结论 Agent 基于证据生成带引用、可回查、不编造的审查报告。
 
-1. 🔥 **信息爆炸与上下文遗忘** —— 长文本检索后关键信息淹没在噪声中，模型难以聚焦
-2. 👻 **幻觉与事实漂移** —— 多轮推理过程中，模型倾向于"编造"未经验证的事实
-3. 📊 **缺乏系统性评估** —— 现有评测多以单轮 QA 为主，缺少对"深度研究报告"这一输出形态的端到端评价体系
+核心不是"检索 → 中间总结 → 再总结 → 最终答案"，而是：
 
-本项目从零构建了一套**面向深度研究任务的 Agent 系统**，覆盖规划、执行、记忆、对抗、进化、评测全链路。
-
----
-
-## 🎯 实验动机
-
-> **"如果一个 Agent 只能回答简单问题，那它和搜索引擎有什么区别？"**
-
-我们的动机是：**让 AI 真正具备"深度研究"的能力**——不只是检索信息，而是像人类研究员一样：
-- 🧩 **拆解复杂问题** → 将模糊的研究目标分解为可执行的子任务
-- 🔍 **多源信息整合** → 从网页、论文、数据库等多渠道收集证据
-- ⚖️ **批判性审视** → 主动发现并修正报告中的错误和偏见
-- 📝 **结构化输出** → 生成带引用、有逻辑、可验证的研究报告
-
----
-
-## 💡 解决方法
-
-### 六大模块协同工作
-
-| 模块 | 职责 | 核心技术 |
-|------|------|---------|
-| 🎛️ **M1 Orchestrator** | 多智能体编排与调度 | 自研 asyncio + DAG 执行引擎，9 状态状态机 |
-| 🗺️ **M2 Planner** | 复杂问题拆解 | JSON DAG 动态规划，支持执行中 replan |
-| 🗜️ **M3 Compressor** | 长上下文压缩 | Embedding 语义三级过滤 + TextRank 关键句提取 |
-| 🧠 **M4 Memory Store** | 跨 Agent 共享记忆 | SQLite + numpy 向量索引，去重/矛盾检测/LRU 淘汰 |
-| ⚔️ **M5 Adversarial Loop** | 对抗降噪 | Red-Blue 循环攻击-修复，内置收敛与震荡检测 |
-| 🧬 **M6 Evolution Engine** | 在线自进化 | GRPO 强化学习 + 符号规则学习（预留接口） |
-
-### 数据流全景
-
-```raw
-用户 Query
-    ↓
-🗺️ Planner 拆解为 DAG 子任务图
-    ↓
-🎛️ Orchestrator 按拓扑排序并发调度
-    ↓
-🤖 Worker Agents 调用 🔍 搜索 / 📄 论文 / 🌐 网页 工具
-    ↓
-🧠 Memory Store 写入中间结果（去重 + 矛盾检测）
-    ↓
-🗜️ Compressor 压缩长上下文（L1→L2→L3）
-    ↓
-⚔️ Red Agent 攻击 → Blue Agent 修复 → 评分引擎评估
-    ↓
-📝 Summarizer 合成最终 Markdown 报告
-    ↓
-📤 输出带元信息的结构化研究报告
+```
+问题
+ ↓
+Planner 拆解"需要调查什么"（只生成调查要点，禁止中间结论）
+ ↓
+多个 Searcher 并行收集证据（只找完整可引用的原始条款，不输出结论）
+ ↓
+EvidenceAssembler 把命中切片恢复成连续原文（quote 一律取自 DB full_text，LLM 不得改写）
+ ↓
+CitationVerifier 纯程序化校验（quote == full_text[start:end]，不依赖 LLM）
+ ↓
+EvidenceStore 去重入库（按 document_id + start/end 偏移），只按 ID 传递
+ ↓
+Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还缺什么（不裁判）
+ ↓
+┌─ SUFFICIENT ───────────────────────────→ Refiner 生成结论（唯一结论 Agent，JSON + Markdown）
+│
+└─ NEED_MORE 且 未达轮数上限 且有有效新增
+        ↓ 增量 Planner（只补缺失要点）→ 重新派发 Searcher → Reviewer
+（达上限 / 无有效新增 → PARTIALLY_SUFFICIENT，仍进 Refiner 并如实说明缺口）
 ```
 
+### 设计原则（贯穿全代码的硬约束）
+
+1. **证据 = 原文，永不改写、永不压缩丢失**：`Evidence.quote` 是从数据库 `documents.full_text[start:end]` 截取的**连续原文**，禁止模型改写；
+2. **引用只许用证据 ID**：结论正文只用 `[E001]` 标注，由后处理把 E### 映射成《文档》章节 + 页码，杜绝模型自编条款号；
+3. **分层职责**：Searcher 只找证据、Reviewer 只评完整性、Refiner 是唯一生成结论的 Agent；中间层一律不产出推理性结论，降低错误在多轮 Agent 间传播的风险；
+4. **需要的原文随时可取回**：证据带 `evidence_id + section_path + charspan`，全文在库里，凭 ID 即回查。
+
 ---
 
-## ✨ 项目精彩之处
+## 🧱 模块结构（`src/`）
 
-### 🏗️ 1. 自研编排引擎，不依赖 LangGraph/AutoGen
+### 现行主链路
 
-> 为什么不用现成的框架？因为深度研究任务需要**完全可控的调度逻辑**。
+| 模块 | 职责 |
+|------|------|
+| `src/contract/schemas.py` | 领域模型：`Evidence / ResearchQuestion / WorkerResult / ReviewResult / RefinerResult / ResearchState` |
+| `src/contract/planner.py` | Planner：`initial_plan` 拆调查要点 + `incremental_plan` 只补缺失；每轮最多 3 个 |
+| `src/contract/worker.py` | `Searcher(BaseAgent)`：多轮工具循环收集证据，输出 `WorkerResult`（仅证据） |
+| `src/contract/tools.py` | `DocumentToolkit`：`search / get_chunk / get_context / get_section / get_document_outline / get_referenced_section`（条款级检索 + 交叉引用跟随） |
+| `src/contract/assembler.py` | `EvidenceAssembler`：候选 → 从 full_text 截取连续原文的 `Evidence` |
+| `src/contract/verifier.py` | `CitationVerifier`：quote 与 DB 原文逐字符比对 + 切片覆盖无空洞 |
+| `src/contract/store.py` | `EvidenceStore`：运行期内存证据库，按 `(doc_id, start, end)` 去重，分配 `E###` |
+| `src/contract/reviewer.py` | Reviewer：覆盖度 / 冲突 / 缺口审查；`effective_new_evidence` 决定是否提前收尾 |
+| `src/contract/refiner.py` | Refiner：唯一结论 Agent；`supporting_evidence_ids` 只落最支撑结论的证据子集 |
+| `src/contract/jsonutil.py` | 稳健 JSON 提取（对象 / 数组，去围栏 / 去噪） |
+| `src/orchestrator/` | 状态机编排器（PLANNING → DISPATCHING → COLLECTING → REVIEWING → INCREMENTAL_PLANNING → REFINING）+ `AgentPool` 对象池（DAG 分层并发 + Semaphore + 超时） |
+| `src/models/` | 多后端 LLM 路由（DeepSeek / MiMo / vLLM / OpenAI），模块级采样参数管理 |
+| `src/utils/` | `.env` 加载（`env_config.py`）、LangSmith 追踪（`tracing.py`） |
 
-- 基于 `asyncio` + `Semaphore` 实现 **DAG 拓扑并发执行**
-- **9 状态状态机**：IDLE → PLANNING → DISPATCHING → COLLECTING → SYNTHESIZING → ADVERSARIAL → DONE
-- **三级降级策略**：单任务超时标记继续 → >50% 失败触发 replan → 全局超时强制合成
+### 数据底座（复用）
 
-### ⚔️ 2. Red-Blue 对抗降噪 —— 主动抑制幻觉
+| 模块 | 职责 |
+|------|------|
+| `src/document/` | 文档解析（txt / pdf / docx）→ 结构感知切块 → bge-m3 向量化 → 入库；`full_text` 列保存原文 |
+| `src/retrieval/` | `PostgresRetriever`：vector（pgvector）/ BM25（ParadeDB `pg_search`）/ hybrid（加权 RRF）；`session_id` 作用域强制 |
+| `src/contract/eval/` | 评测子系统（见下文"评测"） |
 
-> 灵感来自 GAN 的对抗训练思想，但应用于**文本质量优化**。
+### 遗留模块（改造前 deep-research 时代，当前合同链路**不再使用**）
 
-- **Red Agent** 从 5 个维度攻击报告：事实性、逻辑一致性、引用质量、覆盖面、时效性
-- **Blue Agent** 执行 4 种修复操作：ADD / DELETE / MODIFY / VERIFY
-- **收敛控制**：评分达标（≥8.0）/ 变化收敛（Δ < 0.3）/ 轮数上限（3 轮）三选一终止
-- **震荡检测**：已修复问题重新出现 → 判定震荡 → 优雅终止
+- `src/adversarial/`（Red/Blue 对抗）、`src/evolution/`（GRPO 自进化）、`src/compressor/`（M3 上下文压缩）
+- `src/tools/`（web_search / arxiv / browser / calculator 等 web 研究工具）
+- `src/agents/researcher.py` / `summarizer.py`（仅 `base_agent.py` 作为 Searcher 基类在用）
+- `src/memory/`：`SharedMemoryStore` 当前只用于把**最终报告**写入 SQLite（`data/memory.db`），不参与检索；`short_term.py` 未使用
+- 顶层 `evaluation/` 及 `scripts/run_ablation.py / run_benchmark.py / run_evolution.py / run_judge.py / run_all_experiments.py / run_repl.py` 面向旧 web 流程，已不适配
+- `configs/agents/`、`configs/evolution/`、`configs/tools/` 系列 YAML、`pyproject.toml` 里的包名/入口均为旧工程残留
 
-### 🗜️ 3. 语义级上下文压缩 —— 不是简单截断
-
-> 关键词匹配会丢失语义，简单截断会丢失关键信息。**我们用 Embedding 做语义压缩**。
-
-- **L1 粗过滤**：cosine similarity < 0.6 丢弃，> 0.95 完整保留
-- **L2 细筛选**：TextRank + Query-Biased 提取关键句
-- **L3 精保留**：高度相关内容保留原文，避免摘要失真
-
-### 🧠 4. 跨 Agent 共享记忆 —— 会"反思"的系统
-
-- 写前自动**去重**（cosine > 0.92）
-- **矛盾检测**：启发式反义词 + 语义对立识别
-- 三种**矛盾消解策略**：Majority Vote / Source Weight / LLM Judge
-- **Session 隔离**：不同用户/会话的记忆物理隔离
-
-### 🔌 5. 多后端 LLM 路由 —— 零源码切换模型
-
-```yaml
-# configs/default.yaml
-model:
-  backend_mapping:
-    solver: "deepseek"      # 强推理
-    planner: "deepseek"     # 结构化输出
-    red_agent: "mimo"       # 稳定、低成本
-    blue_agent: "mimo"
-    judge: "mimo"
-    compressor: "mimo"
-```
-
-- 支持 DeepSeek / MiMo 2.5 Pro / vLLM / OpenAI **热切换**
-- 模块级采样参数集中管理，**避免配置漂移**
-- `.env` 驱动，**零源码修改**接入新后端
-
-### 📊 6. 完整的深度研究评测体系
-
-> 不做"跑几个例子看看"的评测，做**可复现、可量化、有统计显著性**的评测。
-
-| 评测层级 | 方法 | 特点 |
-|---------|------|------|
-| 📏 **规则指标** | 事实准确率 / 幻觉率 / 引用覆盖率 / 逻辑一致性 | 免费、可复现、零 API 成本 |
-| 📚 **公共数据集** | HotpotQA 多跳 QA 深度研究变体 | 传统 EM/F1 + 新增语义覆盖度 |
-| 🏗️ **自建评测集** | ResearchBench 35 题 × 11 领域 | 含 expected_topics + ground_truth |
-| 👨‍⚖️ **LLM-as-Judge** | MiMo 5 维度 0-10 分深度评分 | 定性+定量互补 |
-| 🥊 **Head-to-Head** | Agent vs 单轮 LLM 直接对比 | pairwise 更可靠 |
-| 📈 **统计显著性** | Bootstrap 95% CI + Cohen's d + t-test | 拒绝"随机波动" |
+> 读代码时别被以上旧模块误导——主流程只依赖 `src/contract/` + `src/orchestrator/` + `src/document/` + `src/retrieval/` + `src/models/`。
 
 ---
 
 ## 🚀 快速开始
 
-### 环境准备
+### 1. 环境准备
 
 ```bash
-# 1. 克隆项目
-git clone https://github.com/qiqihezh/deepresearch-agent.git
-cd deep_research_agent
-
-# 2. 创建 uv 虚拟环境并激活
-uv venv .venv
-source .venv/bin/activate
-
-# 3. 安装核心依赖
+# 依赖（Python 3.10+）
 pip install -r requirements.txt
 
-# 4. 配置 API Key（复制模板后填入）
-cp .env.example .env
-# 编辑 .env：填入 DEEPSEEK_API_KEY、BOCHA_API_KEY 等
+# 配置 .env（连接信息：API Key / Base URL / Model；复制模板后填入）
+cp .env.template .env
+# 需要配置的：DEEPSEEK_API_KEY（主流程）、MIMO_API_KEY（评分/对抗，可选）、PG_*、EMBED_MODEL_NAME
 ```
 
-### 三种运行方式
+### 2. 数据底座（PostgreSQL）
 
-**🎯 单条 Query（单次深度研究）**
-```bash
-python scripts/run_single.py \
-    --query "2024-2025年大模型Agent技术趋势与落地案例研究" \
-    --config configs/default.yaml
-```
-
-**💬 交互式 REPL（支持 Session 继承与连续追问）**
-```bash
-python scripts/run_repl.py
-# 交互命令: ls / sessions / save / q
-```
-
-**🔬 批量实验（全量评测体系，overnight 可跑完）**
-```bash
-python scripts/run_all_experiments.py \
-    --report_file outputs/reports1/report_xxx.md \
-    --report_query "你的研究问题"
-```
-
-> 批量实验默认配置：模块消融 5×12 题 + 轮数消融 4×12 题 + 标准评测 35 题 + 领域对比 3×5 题 + Agent vs LLM 3 题 + Judge 1 次 = **165 次独立研究运行**
-
----
-
-## 📁 仓库结构
-
-```raw
-deep_research_agent/
-├── 📁 configs/                    # YAML 配置中心
-│   ├── default.yaml               # 全局默认配置
-│   ├── agents/                    # Agent 行为配置
-│   ├── interaction_config/        # 交互层配置
-│   └── tool_config/               # 工具层配置
-│
-├── 📁 src/                        # 核心源码（~5000 行）
-│   ├── 📁 core/                   # 核心运行层
-│   │   ├── runner.py              # 初始化模块 + 执行完整研究流程
-│   │   ├── judge.py               # MiMo Judge 统一接口
-│   │   └── ablation.py            # 消融实验通用框架
-│   │
-│   ├── 📁 orchestrator/           # 🎛️ M1: 多智能体编排器
-│   ├── 📁 planner/                # 🗺️ M2: 自适应规划器
-│   ├── 📁 compressor/             # 🗜️ M3: 上下文压缩器
-│   ├── 📁 memory/                 # 🧠 M4: 共享记忆存储
-│   ├── 📁 adversarial/            # ⚔️ M5: 对抗降噪循环
-│   ├── 📁 evolution/              # 🧬 M6: 自进化引擎
-│   ├── 📁 agents/                 # 🤖 Agent 实现
-│   ├── 📁 models/                 # 🔌 模型路由层
-│   ├── 📁 tools/                  # 🛠️ 工具层
-│   └── 📁 utils/                  # 🧰 工具函数
-│
-├── 📁 evaluation/                 # 评测体系（~2000 行）
-│   ├── benchmarks/                # 评测集（ResearchBench / HotpotQA）
-│   ├── metrics/                   # 指标（规则 / Judge / 统计 / 综合）
-│   └── analyze_ablation.py        # 消融实验结果分析
-│
-├── 📁 scripts/                    # 可执行脚本
-│   ├── run_single.py              # 🎯 单条 query CLI
-│   ├── run_repl.py                # 💬 交互式 REPL
-│   ├── run_all_experiments.py     # 🔬 一键批量实验
-│   ├── run_ablation.py            # 消融实验独立入口
-│   ├── run_benchmark.py           # 🥊 Agent vs LLM
-│   ├── run_eval.py                # 标准评测入口
-│   ├── run_judge.py               # 👨‍⚖️ Judge 深度评分
-│   └── validate_env.py            # 环境配置检查
-│
-├── 📁 verl/                       # veRL 训练框架（GRPO）
-├── requirements.txt               # 依赖清单（分级安装）
-└── README.md                      # 📖 本文件
-```
-
----
-
-## 🛠️ 技术栈
-
-| 层级 | 技术 |
-|------|------|
-| 🐍 语言 | Python 3.11 |
-| ⚡ 异步框架 | asyncio |
-| 🧠 LLM 后端 | DeepSeek API / MiMo 2.5 Pro / vLLM / OpenAI |
-| 🔢 嵌入模型 | sentence-transformers (`all-MiniLM-L6-v2`) |
-| 💾 持久化 | SQLite + numpy 向量索引 |
-| 🎓 训练框架 | veRL (GRPO) |
-| 🔭 可观测性 | LangSmith |
-| 📦 虚拟环境 | uv |
-
----
-
-## ⚖️ 合同证据链模式（LexContract，默认主流程）
-
-本项目已原地改造为 **合同/法律文档证据链研究系统**，替代原 web 深度研究流程。
-
-核心不是“检索 → 中间总结 → 再总结 → 最终答案”，而是：
-
-```raw
-问题
- ↓
-Planner 拆解“需要调查什么”（研究问题，禁止中间结论）
- ↓
-多个 Searcher 并行收集证据（只找完整可引用的原始条款，不写结论）
- ↓
-EvidenceAssembler 把碎片 Chunk 恢复成连续原文（quote 一律取自 DB full_text）
- ↓
-CitationVerifier 纯程序化校验（quote == full_text[start:end]，无 LLM 判断）
- ↓
-EvidenceStore 去重（按 document_id + start_offset + end_offset），只传 Evidence ID
- ↓
-Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还缺什么
- ↓
-┌─ SUFFICIENT ────────────────────→ Refiner（唯一结论 Agent，输出 JSON + Markdown）
-│
-└─ NEED_MORE 且 iteration<3 且有有效新增
-        ↓ 增量 Planner（只补缺失要点）→ 重新派发 Worker → Reviewer
-（达 3 轮 / 无有效新增 → PARTIALLY_SUFFICIENT，仍进 Refiner 并如实说明缺口）
-```
-
-### 新增模块（`src/contract/`）
-
-| 文件 | 职责 |
-|------|------|
-| `schemas.py` | Evidence / ResearchQuestion / WorkerResult / ReviewResult / RefinerResult / ResearchState |
-| `planner.py` | Planner：initial_plan（拆调查要点）+ incremental_plan（只补缺失） |
-| `worker.py` | Searcher：多轮检索循环，输出 WorkerResult（仅证据，绝不输出结论） |
-| `tools.py` | DocumentToolkit：`search` / `get_chunk` / `get_context` / `get_section` / `get_document_outline` / `get_referenced_section` |
-| `assembler.py` | EvidenceAssembler：碎片 Chunk → 用于引用的连续原文 Evidence |
-| `verifier.py` | CitationVerifier：quote 与 DB 原文精确比对 + 切片覆盖无空洞 |
-| `store.py` | EvidenceStore：按跨度去重，只按 ID 传递/读取 |
-| `reviewer.py` | Reviewer：研究完整性审查（覆盖度/冲突/缺口），不裁判 |
-| `refiner.py` | Refiner：唯一结论 Agent，引用约束 `[E###]`，JSON + Markdown 双输出 |
-| `jsonutil.py` | 稳健 JSON 提取（对象/数组，去围栏/去噪） |
-
-### 复用的既有底座
-
-- `src/document/`：Docling 结构解析 + 结构感知切块 + bge-m3 向量化 → PostgreSQL/pgvector（`Chunk/ChunkMetadata` 已含 `section_path/page_no/charspan`）
-- `src/retrieval/`：`PostgresRetriever`（vector / BM25(pg_search) / hybrid 加权 RRF），session 作用域隔离
-- `src/orchestrator/`：DAG 分层并发 + Semaphore + 单任务超时保持在原有状态机内（新增 `REVIEWING / INCREMENTAL_PLANNING / REFINING` 状态，`TaskType.EVIDENCE`）
-- `src/planner/dag.py`、`src/models/`（多后端 LLM 路由）、`src/planner/budget_tracker.py`
-
-### 数据库要求（相对原 document 模块的增量）
-
-- `documents` 表新增 `full_text TEXT` 列（CitationVerifier 精确校验与条款拼接依赖）
-- 依赖 **ParadeDB**（`pg_search`）+ pgvector；BM25 依赖 `chunks.search_tokens`（jieba 回填）
-- 迁移旧库：`python -m src.document.main migrate`（加列 + 从 JSON 恢复全文 + 回填 tokens；`parse` 已自动回填）
-
-### 使用
+合同向量库依赖 **PostgreSQL + pgvector + ParadeDB `pg_search` 扩展**（BM25）。连接配置在 `.env`（默认 `localhost:5433/lexcontract`，可用 `PG_*` 覆盖）。
 
 ```bash
-# 1) 解析入库（含全文 + 向量 + BM25 tokens）
+# 初始化检索 schema（pg_search 扩展 / session_id / search_tokens / BM25 索引）
+python -m src.retrieval.main init-db
+
+# 解析并把合同入库（含全文 + 向量 + BM25 tokens）
 python -m src.document.main parse <合同文件或目录>
 
-# 2) 把文档分派到会话（检索必须作用域）
-python -m src.retrieval.main assign <doc_id> --session S1
+# 旧库迁移（加 full_text 列 + 恢复全文 + 回填 BM25 tokens）
+python -m src.document.main migrate
 
-# 3) 提问（输出 .md + .json 双报告）
-python scripts/run_single.py --query "供应商能否单方面终止合同？" --session S1
-python scripts/run_single.py --query "不可抗力如何影响交货义务" --session S1 --doc doc_a,doc_b
+# 把文档分派到会话（检索强制要求 session 作用域）
+python -m src.retrieval.main assign <doc_id> --session S1
+python -m src.retrieval.main sessions        # 查看会话
 ```
 
-输出示例：`outputs/reports/report_*.md`（可读报告）+ `report_*.json`（结构化 RefinerResult：`conclusion / points / citations / evidence_gap / final_status`）。
+### 3. 跑一条合同问题
 
-### 冒烟测试
+```bash
+python scripts/run_single.py --query "乙方逾期交付货物，需要承担什么责任？" --session S1
+python scripts/run_single.py --query "供应商能否单方面终止合同？" --session S1 --doc doc_a,doc_b
+```
+
+输出 `outputs/reports/report_*.md`（可读报告）+ `report_*.json`（结构化 RefinerResult：`conclusion / points[.evidence_ids] / supporting_evidence_ids / citations / evidence_gap / final_status`）+ 同目录 `run_*.log`（全程 tee 日志）。
+
+### 4. 冒烟测试
 
 ```bash
 python tests/contract_smoke.py
 ```
 
-两层：Tier A 用真实 DB 验证 `quote == full_text[offset]`、篡改引用被拒、跨度去重；Tier B 用确定性 stub LLM 驱动完整 Orchestrator（NEED_MORE → 增量规划 → 第二轮 → SUFFICIENT → Refiner），不依赖网络。
+两层：**Tier A**（离线，真实 DB）验证 `EvidenceAssembler / CitationVerifier / EvidenceStore` —— quote 与原文一致、篡改引用被拒、按跨度去重；**Tier B**（确定性 stub LLM，不依赖网络）驱动完整 Orchestrator 状态机（NEED_MORE → 增量规划 → 第二轮 → SUFFICIENT → Refiner）。DB 不可达时打印 SKIP 正常退出。
 
-### 与原工程的关系
+---
 
-- 原地改造：`scripts/run_single.py` 已改为合同入口（`--session` 必填）；`evaluation/`、`run_ablation.py`、`run_benchmark.py` 等面向旧 web 流程的脚本已不再适配（标注弃用）。原 `ResearcherAgent` 的 web 工具、M5 Red/Blue 对抗、M6 进化在合同流程中不再使用（文件保留便于回溯）。
-- 设计要点：Chunk 只服务检索效率，Evidence 才服务引用与推理；中间层不产出推理性结论，把主要推理压力集中到最终 Refiner，降低错误在多轮 Agent 间传播的风险。
+## 🎛️ 配置与核心参数
 
-### 评测（LegalBenchRAG + ContractNLI）
+全局配置集中在 `configs/default.yaml`（唯一被主流程加载的配置）：
 
-对合同流程的回归评测集中在 `src/contract/eval/`，数据取自本机（不联网下载）：LegalBenchRAG（`contractnli/cuad/maud/privacy_qa` 4 个 benchmark）+ ContractNLI（整份合同做 premise 的 NLI）。
+| 段 | 关键项 | 说明 |
+|----|--------|------|
+| `model` | `backend` / `backend_mapping` | 默认后端与各模块后端分工（如 solver/planner/summarizer → deepseek，judge → mimo） |
+| `model.backend_sampling` | `modules.*` | 模块级采样参数（temperature / max_tokens）的唯一出处 |
+| `contract` | `max_iterations` / `max_concurrent` / `global_timeout_seconds` / `stop_on_no_effective_new_evidence` / `enable_evidence_verification` | 证据链流预算与开关 |
+| `eval` | `k` / `agent_limit` / `contractnli_mode` / `sessions` | 评测参数（见下文） |
 
-核心思路：
-- **偏移对齐优先**：LegalBenchRAG 的 gold `span` 是 corpus 原始 txt 的字符偏移。`ingest_raw.py` 把语料"原样入 PG"（`full_text` 逐字保留原文），在 **raw 偏移上**做切片：默认按 **token 预算（500，对齐 PAKTON `chunk_sizes=[500]`）+ 标题启发式边界 + 相邻重叠**，`charspan` 直接就是语料原文坐标，与 gold 精确比对。已抽验 DB 与原文逐字一致（38521 切片刻画 0 偏移错位，gold span 覆盖 ≈0.999）。
-- **双报（RAG 能力）**：确定性混合检索（全量 query，产出文档级 `Recall@k(k=1..64)` + MRR）＋ LLM Searcher agent（按 `--agent-limit` 抽样，产出字符区间 `Precision/Recall/F1`）。
-- **分类（端到端能力）**：ContractNLI 默认走 **`indexed`（整库入库 + 检索式）**，对齐 PAKTON 的"文档内检索"口径——607 份 distinct 合同先入库，每条假设在该合同索引内检索出相关条款（原文+偏移）再交给 `Planner` 归类；`--nli-mode direct` 保留"整段前提直喂"的 naive baseline。输出 `Accuracy / weighted F1 / per-class F1`。
-- **适配器**：`adapter.py` 的 `LegalBenchAdapter` / `ContractNLIAdapter` 负责基准输入（query→Searcher 任务、(premise,hypothesis)→prompt）、输出（证据→`(file_path,span)` 命中、原始输出→标签）、提示词的适配。
-- **全量持久化**：每条输入 → prompt → 原始输出 → gold → 得分 → 遥测/轨迹，逐条写入 `records.jsonl`（即时 flush），`summary.json` + `metrics.csv` 汇总，以 `instance_id` 断点续跑。
+### 上下文预算（"压缩"的现行做法）
+
+现行链路**不做语义级文本压缩**（证据必须保留原文），改用以下手段把上下文控制住：
+
+- **输入窗口**：`VLLMPolicy.MAX_CONTEXT_CHARS = 150_000`（≈50K content tokens），仅超此阈值才触发"丢旧轮次"的滑动窗口兜底（`src/models/vllm_policy.py`）；
+- **规划配额**：Planner 每次规划最多 **3 个**调查要点、整个流程最多 **3 轮**（`MAX_QUESTIONS_PER_CALL=3`，`max_iterations=3`）；
+- **检索配额**：Searcher 最多 **3 个检索轮** × 每轮最多 **3 个检索词**（≈最多 9 次搜索；`MAX_SEARCH_ROUNDS=3`、`MAX_SEARCHES_PER_ROUND=3`），并设"收官轮"强制模型输出证据 JSON，避免搜很多却交不出候选（`src/contract/worker.py`）；
+- **按需构造上下文**：Planner/Reviewer 只喂精简信息，Refiner 才是唯一全量读证据正文的环节；
+- **用 Evidence ID 而非全量字节在两轮之间传递**：`EvidenceStore` 按跨度去重后只传 `E###`，要读正文时按 ID 取出。
+
+> 历史教训：曾经存在 `store = store or self.store` 的写法，`EvidenceStore` 的 `__len__` 使空库在 `bool()` 下为 False，导致本次运行的证据库被当作"未提供"而静默丢弃，Searcher 找到的证据始终进不了 Reviewer/Refiner，最终 Refiner 在零证据下编造数字（0.5%、15 日等与原文不符的内容）。已改为 `is None` 判断并加注释（`src/contract/worker.py:_assemble_worker_result`），并补了端到端验证。
+
+---
+
+## 📊 评测（`src/contract/eval/`）
+
+针对合同流程的回归评测：
+
+- **LegalBenchRAG**（`contractnli / cuad / maud / privacy_qa` 4 个 benchmark）：**确定性混合检索**全量跑（文档级 `Recall@k(k=1..64)` + MRR）＋ **LLM Searcher agent** 按 `--agent-limit` 抽样跑（字符区间 `Precision/Recall/F1`）双报告；
+- **ContractNLI**（端到端分类）：默认 **`indexed` 模式 = 合同整库入库 + 按假设检索出相关条款再分类**（对齐 PAKTON 的"文档内检索"口径）；`--nli-mode direct` 保留"整段前提直喂"的 naive baseline。输出 `Accuracy / weighted F1 / per-class F1`；
+- **偏移对齐是前提**：`ingest_raw.py` 把语料"原样入 PG"（`full_text` 逐字保留原文，`charspan` 即语料原文坐标），gold span 才能精确比对；
+- **全量持久化 + 断点续跑**：每条 `input → prompt → 原始输出 → gold → 得分 → 遥测` 即时写入 `records.jsonl`，`summary.json` + `metrics.csv` 汇总，以稳定 `instance_id` 跳过已完成实例。
 
 ```bash
-# 语料入库（评测会自动处理缺失的 LegalBenchRAG 会话，也可手动）：
+# 语料入库（LegalBenchRAG 会话为空时评测会自动处理，也可手动）
 python -m src.contract.eval.ingest_raw contractnli        # cuad / maud / privacy_qa
-# ContractNLI 合同入库（indexed 模式前必须执行；不会自动入库）：
-python -m src.contract.eval.ingest_raw nli                # 607 份 distinct 合同，默认会话 nli-contractnli
-# LegalBenchRAG：确定性部分全量，agent 部分按配置抽样
+# ContractNLI 合同入库（indexed 模式前必须执行；不会自动入库）
+python -m src.contract.eval.ingest_raw nli
+
+# 跑评测
 python -m src.contract.eval.main --mode legalbenchrag
-# 只看某个 benchmark / 调整抽样
 python -m src.contract.eval.main --mode legalbenchrag --only privacy_qa --agent-limit 20
-# ContractNLI（indexed 检索式默认；--limit 抽样控 token）：
-python -m src.contract.eval.main --mode contractnli --subset test --limit 100
-# 若要直接对比 naive baseline：
-python -m src.contract.eval.main --mode contractnli --subset test --nli-mode direct --limit 10
+python -m src.contract.eval.main --mode contractnli --limit 100
+python -m src.contract.eval.main --mode contractnli --nli-mode direct --limit 10
 ```
 
-输出在 `configs/default.yaml` 的 `eval:` 段可配（top-k、抽样规模、会话、输出目录）。已验证跑通的最小闭环：LegalBenchRAG 确定性全量（privacy_qa 194 条，R@1=0.881 / MRR=0.923）+ agent 抽样 + ContractNLI 抽样。
+输出在 `configs/default.yaml` 的 `eval:` 段可配（top-k、抽样、会话、输出目录）。
 
 ---
 
-## 🗺️ Roadmap
+## 🗺️ Roadmap（当前方向 🔥）
 
-- [x] 自研编排引擎（asyncio + DAG）
-- [x] Red-Blue 对抗降噪
-- [x] 语义级上下文压缩
-- [x] 跨 Agent 共享记忆
-- [x] 多后端 LLM 路由
-- [x] 完整评测体系（规则 + Judge + 统计显著性）
-- [x] REPL 交互式会话
-- [ ] 实验结果填充（进行中 🔥）
-- [ ] Web UI（Gradio/Streamlit）
-- [ ] 用户反馈闭环
-- [ ] 多模态支持（图像/表格）
+- [x] 合同证据链主流程 + 断点式评测体系
+- [x] 多后端 LLM 路由（DeepSeek / MiMo / vLLM / OpenAI）
+- [x] 规划 / 检索配额与上下文预算治理（3 轮 × 3 要点；3 检索轮 × 3 检索词；窗口 50K）
+- [x] 修复"证据被静默丢弃导致 Refiner 编造"的根因 bug
+- [ ] **证据板（Evidence Board）**：把进入 Agent 上下文的证据统一为干净的 JSON（`evidence_id / doc / section / page / quote` 等少数字段，去掉调试打分字段），Reviewer/Refiner 读同一块板，超预算时按 `supporting_evidence_ids` 分层显示并凭 ID 回查
+- [ ] 跨 run 记忆复用（基于已核实条款结论，接 PostgreSQL，统一 bge-m3 向量）
+- [ ] Web UI
 
 ---
 
-## 🤝 贡献
+## 🤝 贡献 & License
 
-欢迎提交 Issue 和 PR！无论是 bug 修复、功能增强还是文档改进，我们都非常感谢。
+欢迎提交 Issue 与 PR。
 
----
-
-## 📄 License
-
-[MIT](LICENSE) © 2025 DeepResearch Agent Contributors
+[MIT](LICENSE) © LexContract Contributors
