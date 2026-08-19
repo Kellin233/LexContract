@@ -1,8 +1,6 @@
 """PostgreSQL 连接与检索模块的管理操作：建表/会话分派/search_tokens 回填。"""
 from __future__ import annotations
 
-from pathlib import Path
-
 import psycopg
 from pgvector.psycopg import register_vector
 
@@ -23,12 +21,39 @@ def connect() -> psycopg.Connection:
     return conn
 
 
-def init_db(conn: psycopg.Connection) -> None:
-    """执行检索相关的建表/加列/建扩展脚本（幂等）。"""
-    schema_path = Path(__file__).resolve().parent / "schema.sql"
+def init_db(conn: psycopg.Connection) -> bool:
+    """初始化会话字段，并尽力启用 pg_search/BM25。
+
+    基础会话字段必须独立提交，这样普通 PostgreSQL 缺少 pg_search 时仍能
+    使用文档全文、grep 和向量检索。返回值为 BM25 是否可用；保留 ``None``
+    兼容旧的外部实现。
+    """
     with conn.cursor() as cur:
-        cur.execute(schema_path.read_text(encoding="utf-8"))
+        cur.execute(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
+            "session_id TEXT NOT NULL DEFAULT ''"
+        )
+        cur.execute(
+            "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS "
+            "search_tokens TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_search")
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_chunks_bm25
+                    ON chunks USING bm25 (id, search_tokens)
+                    WITH (key_field = 'id')
+                """
+            )
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        return False
+    return True
 
 
 def assign_session(conn: psycopg.Connection, doc_id: str, session_id: str) -> bool:

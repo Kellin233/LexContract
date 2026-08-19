@@ -251,7 +251,7 @@ class DocumentToolkit:
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT full_text FROM documents WHERE doc_id = %s AND session_id = %s",
+                "SELECT d.full_text FROM documents d WHERE d.doc_id = %s AND d.session_id = %s",
                 (doc_id, self.session_id),
             )
             row = cur.fetchone()
@@ -264,7 +264,8 @@ class DocumentToolkit:
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT doc_id, title, source_format FROM documents WHERE doc_id = %s AND session_id = %s",
+                "SELECT d.doc_id, d.title, d.source_format FROM documents d "
+                "WHERE d.doc_id = %s AND d.session_id = %s",
                 (doc_id, self.session_id),
             )
             row = cur.fetchone()
@@ -282,14 +283,14 @@ class DocumentToolkit:
             doc_filter = ""
             params: list[Any] = [self.session_id]
             if self._doc_ids:
-                doc_filter = " AND doc_id = ANY(%s)"
+                doc_filter = " AND d.doc_id = ANY(%s)"
                 params.append(list(self._doc_ids))
             cur.execute(
                 f"""
-                SELECT doc_id, title, source_format
-                FROM documents
-                WHERE session_id = %s{doc_filter}
-                ORDER BY doc_id
+                SELECT d.doc_id, d.title, d.source_format
+                FROM documents d
+                WHERE d.session_id = %s{doc_filter}
+                ORDER BY d.doc_id
                 """,
                 params,
             )

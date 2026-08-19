@@ -46,8 +46,13 @@ def _ensure_retrieval_schema() -> bool:
     conn = None
     try:
         conn = connect()
-        retrieval_init_db(conn)
-        return True
+        result = retrieval_init_db(conn)
+        if result is False:
+            print(
+                "[warn] 检索 schema 基础字段已就绪，但 pg_search 不可用，BM25 功能降级。",
+                file=sys.stderr,
+            )
+        return result is not False
     except Exception as e:  # noqa: BLE001
         if conn is not None:
             conn.rollback()

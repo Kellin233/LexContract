@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import sys
 import threading
 from collections import defaultdict
 from typing import Callable
@@ -13,6 +14,23 @@ from . import config
 from .models import RetrievedChunk
 from .tokenizer import build_bm25_query
 from .store import connect
+
+
+_bm25_warning_lock = threading.Lock()
+_bm25_warning_emitted = False
+
+
+def _warn_bm25_unavailable(error: Exception) -> None:
+    """对 pg_search 缺失或 BM25 schema 不可用只告警一次。"""
+    global _bm25_warning_emitted
+    with _bm25_warning_lock:
+        if _bm25_warning_emitted:
+            return
+        _bm25_warning_emitted = True
+    print(
+        f"[warn] pg_search 不可用，BM25 检索已降级，仅使用向量检索: {error}",
+        file=sys.stderr,
+    )
 
 
 def _vector_literal(values: list[float]) -> str:
@@ -134,7 +152,11 @@ class PostgresRetriever:
             ORDER BY score DESC, c.chunk_index ASC
             LIMIT %s
         """
-        rows = self._execute(sql, params)
+        try:
+            rows = self._execute(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            _warn_bm25_unavailable(exc)
+            return []
         return self._to_chunks(rows, "bm25")
 
     # --- 混合检索：加权 Reciprocal Rank Fusion ---

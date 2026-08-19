@@ -31,7 +31,7 @@ class FakeCursor:
         params = tuple(params)
         if "select 1 from documents" in text:
             self.rows = [(1,)] if params == ("doc-a", "S1") else []
-        elif "select full_text from documents" in text:
+        elif "full_text" in text and "from documents" in text:
             self.rows = [("alpha",)]
         elif "select c.id, c.text, c.section_path" in text:
             self.rows = [("doc-a:0", "alpha", ["Section 1"], 1, [0, 5])]
