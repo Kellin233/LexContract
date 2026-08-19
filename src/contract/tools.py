@@ -102,17 +102,101 @@ class DocumentToolkit:
     # ------------------------------------------------------------------
     # 基础能力
     # ------------------------------------------------------------------
-    def search(self, query: str, mode: str = "hybrid", top_k: int = 20) -> list[dict]:
-        """混合/向量/BM25 检索，返回候选 Chunk（含元数据与得分）。"""
+    def search(self, query: str, mode: str = "hybrid", top_k: int = 20,
+               doc_id: str | None = None) -> list[dict]:
+        """混合/向量/BM25 检索，返回候选 Chunk（含元数据与得分）。
+
+        doc_id 非空时把检索收敛到单篇文档（多文档语料里先定位文档再查条款）。
+        """
         with self._lock:
             rows = self.retriever.retrieve(
                 query,
                 mode=mode,
                 session_id=self.session_id,
                 limit=max(top_k, 1),
-                doc_ids=self._doc_ids or None,
+                doc_ids=[doc_id] if doc_id else (self._doc_ids or None),
             )
         return [r.model_dump(mode="json") for r in rows]
+
+    def search_vector(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
+        """向量语义检索（bge-m3 相似度），擅长整句含义 / 同义表述。"""
+        return self.search(query, mode="vector", top_k=top_k, doc_id=doc_id)
+
+    def search_bm25(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
+        """BM25 关键词排名检索，擅长命名词面关键词。"""
+        return self.search(query, mode="bm25", top_k=top_k, doc_id=doc_id)
+
+    def search_hybrid(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
+        """混合检索（向量 + BM25 RRF 融合），不确定用哪种时的稳妥默认。"""
+        return self.search(query, mode="hybrid", top_k=top_k, doc_id=doc_id)
+
+    def grep(self, pattern: str, mode: str = "literal", top_k: int = 20,
+             case_sensitive: bool = False, doc_id: str | None = None) -> list[dict]:
+        """在切片原文里做精确字符匹配（literal 字面 / regex POSIX 正则），返回命中切片。
+
+        与 search 系列不同：grep 只按原文是否包含 pattern 过滤，不做打分排序，
+        按文档内顺序返回，并附 match_count（该切片内命中次数）。
+
+        doc_id 非空时把匹配收敛到单篇文档（多文档语料里先定位文档再精确确认条款）。
+        """
+        if not self.session_id:
+            raise ValueError("refusing an unscoped grep search (session_id is empty)")
+        if not pattern:
+            return []
+        from src.retrieval.store import connect
+
+        params: list = [self.session_id]
+        scope_sql = ""
+        if doc_id:
+            scope_sql = " AND c.doc_id = %s"
+            params.append(doc_id)
+        elif self._doc_ids:
+            scope_sql = " AND c.doc_id = ANY(%s)"
+            params.append(list(self._doc_ids))
+
+        if mode == "regex":
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                rx = re.compile(pattern, flags)
+            except re.error as e:
+                raise ValueError(f"invalid grep regex {pattern!r}: {e}") from e
+            operator = "~" if case_sensitive else "~*"  # POSIX regex（PostgreSQL ~）
+            match_sql = f"c.text {operator} %s"
+            params.append(pattern)
+        else:  # literal：转义 LIKE 通配符后，把包裹好的 '%...%' 当单参数传
+            esc = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            operator = "LIKE" if case_sensitive else "ILIKE"
+            match_sql = f"c.text {operator} %s"
+            params.append(f"%{esc}%")
+
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT c.id, c.text, c.doc_id, d.title, c.section_path, c.page_no,
+                       c.charspan, d.source_format, c.chunk_index
+                FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
+                WHERE d.session_id = %s{scope_sql} AND {match_sql}
+                ORDER BY c.doc_id, c.chunk_index
+                LIMIT %s
+                """,
+                (*params, max(top_k, 1)),
+            )
+            rows = cur.fetchall()
+
+        out = []
+        for r in rows:
+            text = r[1]
+            if mode == "regex":
+                n = len(rx.findall(text))
+            else:  # 与 SQL 过滤口径一致：case_sensitive=False 时计数也不区分大小写
+                n = text.count(pattern) if case_sensitive else text.lower().count(pattern.lower())
+            out.append({
+                "id": r[0], "text": text, "doc_id": r[2], "doc_title": r[3],
+                "section_path": list(r[4] or []), "page_no": r[5] or 0,
+                "charspan": list(r[6] or []), "source_format": r[7] or "",
+                "match_count": n, "mode": mode,
+            })
+        return out
 
     def get_chunk(self, chunk_id: str) -> dict | None:
         """按切片 ID 取切片原文与元数据。"""
@@ -331,21 +415,55 @@ class DocumentToolkit:
         """构建 OpenAI function-calling 工具对象列表。"""
         return [
             DocumentTool(
-                name="search",
+                name="search_vector",
                 description=(
-                    "Contract document search: returns relevant passages by semantics/keywords. "
-                    "Use this first for most investigation questions."
+                    "Semantic search (vector): returns passages similar in MEANING, good for whole-clause "
+                    "meaning and paraphrases. Use when you need semantically relevant clauses."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "The search query (synonyms are allowed)"},
-                        "mode": {"type": "string", "enum": ["hybrid", "vector", "bm25"], "description": "Retrieval mode"},
                         "top_k": {"type": "integer", "description": "Number of candidates to return"},
+                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
                     },
                     "required": ["query"],
                 },
-                handler=self.search,
+                handler=self.search_vector,
+            ),
+            DocumentTool(
+                name="search_bm25",
+                description=(
+                    "Keyword search (BM25): returns passages ranked by keyword hits. Use when the question "
+                    "names specific terms and you want passages near those exact tokens."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query (keywords)"},
+                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
+                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
+                    },
+                    "required": ["query"],
+                },
+                handler=self.search_bm25,
+            ),
+            DocumentTool(
+                name="search_hybrid",
+                description=(
+                    "Hybrid search (vector + BM25, fused): balanced default when unsure which mode fits. "
+                    "Complements search_vector / search_bm25."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query"},
+                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
+                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
+                    },
+                    "required": ["query"],
+                },
+                handler=self.search_hybrid,
             ),
             DocumentTool(
                 name="get_chunk",
@@ -407,6 +525,30 @@ class DocumentToolkit:
                     "required": ["doc_id", "ref"],
                 },
                 handler=self.get_referenced_section,
+            ),
+            DocumentTool(
+                name="grep",
+                description=(
+                    "Exact match search over the ORIGINAL clause text: returns only chunks that literally "
+                    "contain a phrase or a POSIX regular expression. Use to confirm exact wording or locate "
+                    "a provision by precise terms / an article number when semantic search is too loose "
+                    "(e.g. pattern='exceptions', or regex pattern='第[0-9]+条'). "
+                    "mode='literal' (default) matches the plain substring; mode='regex' compiles the pattern "
+                    "as a regular expression (PostgreSQL ARE syntax; Python re is used only to count matches, "
+                    "so Python-only constructs like lookahead may still fail in the SQL query)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "Literal text or POSIX regular expression to find"},
+                        "mode": {"type": "string", "enum": ["literal", "regex"], "description": "literal substring (default) or regex"},
+                        "case_sensitive": {"type": "boolean", "description": "Case-sensitive matching (default false)"},
+                        "top_k": {"type": "integer", "description": "Max number of matching chunks to return"},
+                        "doc_id": {"type": "string", "description": "Lock the grep to one document (its doc_id appears in search results). Use after you have identified the target document."},
+                    },
+                    "required": ["pattern"],
+                },
+                handler=self.grep,
             ),
         ]
 

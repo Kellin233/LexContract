@@ -11,6 +11,8 @@ from __future__ import annotations
 from .jsonutil import extract_json_object
 from .schemas import RefinerResult, RefinerPoint, Citation, FinalStatus, ResearchState
 from .store import EvidenceStore
+from ..utils.conversation_recorder import set_agent
+from ..utils.tokens import estimate_messages_tokens, append_token_usage
 from ..utils.tracing import trace_chain
 
 
@@ -44,18 +46,39 @@ def _section_label(evidence) -> str:
     return path[-1] if path else ""
 
 
+# Refiner 输入预算默认值（token）。超过只会告警/记录，本次不裁剪（裁剪策略后续接入）。
+DEFAULT_REFINER_INPUT_TOKENS = 65536
+
+
 class Refiner:
-    def __init__(self, policy) -> None:
+    def __init__(self, policy, input_token_budget: int | None = None,
+                 system_prompt: str | None = None) -> None:
         self.policy = policy
+        self.input_token_budget = (
+            int(input_token_budget) if input_token_budget is not None else DEFAULT_REFINER_INPUT_TOKENS
+        )
+        # 按评测可切换系统提示词；不传时保持正式生产链路的默认提示词
+        self.system_prompt = system_prompt or SYSTEM_PROMPT
 
     @trace_chain(name="contract_refiner.refine", tags=["contract", "refiner"])
     def refine(self, state: ResearchState, store: EvidenceStore) -> RefinerResult:
+        set_agent("refiner")
         final_status = state.final_status or FinalStatus.PARTIALLY_SUFFICIENT
         prompt = self._build_prompt(state, store, final_status)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
         ]
+        # Refiner 输入预算（token 口径）：超过只告警/记录，本次不裁剪
+        _budget_note: str | None = None
+        _budget_tokens = estimate_messages_tokens(messages)
+        append_token_usage(_budget_tokens)  # 计入本轮全链路 token 账本
+        if _budget_tokens > self.input_token_budget:
+            _budget_note = (
+                f"证据输入约 {_budget_tokens} tokens，超过 Refiner 预算 {self.input_token_budget} tokens；"
+                f"本次未裁剪，仍全量喂入（裁剪策略暂未实现）。"
+            )
+            print(f"[Refiner][WARN] {_budget_note}")
         try:
             response = self.policy(messages)
         except RuntimeError:
@@ -94,6 +117,9 @@ class Refiner:
         # 依据仅落在“最支持结论的证据”子集上（可能是全部，也可能只是一部分）
         result.citations = self._build_citations(supporting, store)
         result.markdown_body = render_markdown(state.original_question, result)
+        if _budget_note:
+            result.notes = f"{result.notes}\n[_budget] {_budget_note}".strip()
+            result.evidence_gap.append(f"[预算告警] {_budget_note}")
         return result
 
     # ------------------------------------------------------------------

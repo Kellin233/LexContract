@@ -12,6 +12,8 @@ from __future__ import annotations
 from .jsonutil import extract_json_object
 from .schemas import ReviewResult, ResearchState, ReviewStatus, EvidenceConflict, MissingAspect
 from .store import EvidenceStore
+from ..utils.conversation_recorder import set_agent
+from ..utils.tokens import append_token_usage, estimate_messages_tokens
 from ..utils.tracing import trace_chain
 
 
@@ -57,11 +59,13 @@ class Reviewer:
     @trace_chain(name="contract_reviewer.review", tags=["contract", "reviewer"])
     def review(self, state: ResearchState, store: EvidenceStore,
                previous: ReviewResult | None = None) -> ReviewResult:
+        set_agent("reviewer")
         prompt = self._build_prompt(state, store, previous)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
+        append_token_usage(estimate_messages_tokens(messages))  # 计入本轮全链路 token 账本
         try:
             response = self.policy(messages)
         except RuntimeError:

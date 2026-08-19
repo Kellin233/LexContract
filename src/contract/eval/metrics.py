@@ -141,11 +141,27 @@ def accuracy(y_true: Sequence[str], y_pred: Sequence[str]) -> float:
 
 
 def f1_weighted(y_true: Sequence[str], y_pred: Sequence[str]) -> float:
-    """weighted F1（按各类支撑数加权），与 sklearn.metrics.f1_score(average='weighted') 一致。"""
-    from sklearn.metrics import f1_score
-    if not y_true:
+    """weighted F1（按各类支撑数加权），与 sklearn.metrics.f1_score(average='weighted') 一致。
+
+    手写实现以避免 sklearn 在单类/退化小样本（如 1~2 条评测）上抛
+    "mix of binary and unknown targets"；标签统一转 str 防 None 混入。
+    """
+    y_t = [str(t) for t in y_true]
+    y_p = [str(p) for p in y_pred]
+    n = len(y_t)
+    if n == 0:
         return 0.0
-    return float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+    classes = sorted(set(y_t) | set(y_p))
+    total = 0.0
+    for c in classes:
+        tp = sum(1 for t, p in zip(y_t, y_p) if t == c and p == c)
+        fp = sum(1 for t, p in zip(y_t, y_p) if t != c and p == c)
+        fn = sum(1 for t, p in zip(y_t, y_p) if t == c and p != c)
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall = tp / (tp + fn) if (tp + fn) else 0.0
+        f = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        total += f * (tp + fn)  # 类权重 = 该类在真实标签中的出现次数
+    return total / n
 
 
 def f1_per_class(y_true: Sequence[str], y_pred: Sequence[str]) -> dict[str, float]:

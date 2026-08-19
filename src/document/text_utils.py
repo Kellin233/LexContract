@@ -7,16 +7,8 @@ import re
 # 保留结尾标点；用负向断言避免把小数点/缩写误切。
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;\n])\s*")
 
-# 简易 token 估算：中文字符按 0.6、其余按空白切分。
-_ZH_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（不引入 tiktoken 依赖）。"""
-    zh = len(_ZH_RE.findall(text))
-    rest = _ZH_RE.sub(" ", text)
-    non_zh = len(rest.split())
-    return int(zh * 0.6 + non_zh)
+# token 估算口径统一在 src/utils/tokens.py，这里转发保持下游（chunker/评测）兼容
+from ..utils.tokens import estimate_tokens  # noqa: E402
 
 
 def search_text(title: str, section_path: list[str], body: str, *, max_path_chars: int = 400) -> str:

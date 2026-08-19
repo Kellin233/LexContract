@@ -2,8 +2,7 @@
 .env
 .env.local
 
-# 测试 / 评测代码（不入库）
-tests/
+# 评测代码（旧 web 流程基准等，不入库；src/contract/eval/ 随 src 一起提交）
 evaluation/
 
 # 实验 / 评测驱动脚本（面向已移除的 deep-research 流程，不入库）

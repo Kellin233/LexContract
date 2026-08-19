@@ -3,7 +3,7 @@
 """评测 CLI：LegalBenchRAG（RAG 能力）与 ContractNLI（端到端分类能力）。
 
 用法:
-  python -m src.contract.eval.main --mode legalbenchrag [--only cuad,maud ...] [--agent-limit 20]
+  python -m src.contract.eval.main --mode legalbenchrag [--only cuad,maud ...]
   python -m src.contract.eval.main --mode contractnli [--limit 100] [--subset contractnli_b]
 
 两个评测都把“每条输入 → prompt → 模型输出 → gold → 得分 → 过程痕迹”全量落盘到
@@ -31,7 +31,7 @@ from src.contract.eval.persist import (
     write_csv,
     write_json,
 )
-from src.contract.eval.planner_runner import run_contractnli, summarize_contractnli_records
+from src.contract.eval.planner_runner import run_contractnli_fullchain, summarize_contractnli_records
 from src.contract.eval.searcher_runner import run_legalbench, summarize_legalbench_records
 
 __all__ = ["main"]
@@ -52,20 +52,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="LegalBenchRAG 只跑这些 benchmark，逗号分隔")
     p.add_argument("--subset", default=None,
                    help="ContractNLI 只跑某个 subset（如 contractnli_b / contractnli_v3）")
-    p.add_argument("--k", default=None, help="Recall@k 的 k 列表，逗号分隔")
-    p.add_argument("--agent-limit", type=int, default=None,
-                   help="每个 benchmark 用真实 LLM Searcher 的 query 数（0=只跑确定性，None=配置默认）")
     p.add_argument("--limit", type=int, default=None,
                    help="ContractNLI 抽样数（None=配置默认/全量）")
-    p.add_argument("--nli-mode", default=None, choices=["indexed", "direct"],
-                   help="ContractNLI 评测方式：indexed=整库入库+检索式（默认，对齐 PAKTON）；"
-                        "direct=整段前提直喂（naive baseline）")
     p.add_argument("--nli-session", default=None,
                    help="ContractNLI 合同索引会话（默认 nli-contractnli）")
-    p.add_argument("--nli-top-k", type=int, default=None,
-                   help="ContractNLI 检索式下每条的检索条款数（默认 8）")
+    p.add_argument("--nli-concurrency", type=int, default=None,
+                   help="ContractNLI 实例并行度（默认取 eval.nli_concurrency，默认 2）")
+    p.add_argument("--searcher-max-rounds", type=int, default=None,
+                   help="Searcher 最多检索轮数（覆写 contract.searcher_max_search_rounds；A/B 对照用）")
+    p.add_argument("--searcher-max-searches-per-round", type=int, default=None,
+                   help="Searcher 每轮最多检索词数（覆写 contract.searcher_max_searches_per_round；A/B 对照用）")
     p.add_argument("--ingest-nli", action="store_true",
-                   help="ContractNLI 会话为空时允许自动入库 distinct 合同（默认禁止）")
+                   help="ContractNLI 会话为空时允许自动入库（默认禁止）")
     p.add_argument("--request-set", default=None,
                    help="预先生成的请求/入库集合 JSON（sampling 模块产物）；只跑其中列出的请求")
     p.add_argument("--ingest-only-referenced", action="store_true",
@@ -90,11 +88,11 @@ def _load_eval_config(args: argparse.Namespace) -> dict:
         cfg = {}
     eval_cfg = dict(cfg.get("eval", {}) or {})
     eval_cfg.setdefault("out_dir", "evaluation/runs")
-    eval_cfg.setdefault("k", M.default_ks())
-    eval_cfg.setdefault("cutoffs", M.official_cutoffs())
-    eval_cfg.setdefault("agent_limit", 20)
     eval_cfg.setdefault("seed", 0)
     eval_cfg.setdefault("embedding_corpus", True)
+    eval_cfg.setdefault("nli_concurrency", 2)
+    eval_cfg.setdefault("searcher_max_search_rounds", 3)
+    eval_cfg.setdefault("searcher_max_searches_per_round", 1)
     eval_cfg.setdefault("sessions", {})
     return eval_cfg
 
@@ -120,17 +118,6 @@ def _load_request_set(args: argparse.Namespace, mode: str) -> dict | None:
         print(f"[eval] 请求集合 mode={data.get('mode')} 与本评测 mode={mode} 不匹配")
         raise SystemExit(1)
     return data
-
-
-def _resolve_ks(args: argparse.Namespace, eval_cfg: dict) -> list[int]:
-    if args.k:
-        return [int(x.strip()) for x in args.k.split(",") if x.strip()]
-    return list(eval_cfg["k"])
-
-
-def _resolve_cutoffs(args: argparse.Namespace, eval_cfg: dict) -> list[int]:
-    """字符级 span 指标的 cutoff（官方 PAKTON：1/4/16/32/64）。"""
-    return list(eval_cfg.get("cutoffs", M.official_cutoffs()))
 
 
 def _seed(args: argparse.Namespace, eval_cfg: dict) -> int:
@@ -185,10 +172,7 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
         print("[legalbenchrag] 没有可评测的 benchmark（检查 --only / 数据目录）")
         return 1
 
-    ks = _resolve_ks(args, eval_cfg)
-    cutoffs = _resolve_cutoffs(args, eval_cfg)
-    seed = _seed(args, eval_cfg)
-    agent_limit = args.agent_limit if args.agent_limit is not None else eval_cfg.get("agent_limit")
+    # Searcher 是唯一检索链路（确定性混合检索已移除），无需 agent 抽样 / ks / cutoffs
     sessions_cfg = dict(eval_cfg.get("sessions", {}) or {})
     chunk_cfg = {
         "max_tokens": eval_cfg.get("ingest_max_tokens"),
@@ -240,8 +224,7 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             continue
         n_resumed += len(queries) - len(pending)
         print(f"  [queries] 总 {len(queries)}，已完成 {len(queries) - len(pending)}，本次将处理 {len(pending)}"
-              + (f"，agent 抽样 {agent_limit}" if agent_limit else "")
-              + ("（确定性部分全量）" if pending else ""))
+              + "（全部走 Searcher 链路）")
 
         factory = _make_searcher_factory(session, solver_policy)
         run_legalbench(
@@ -249,14 +232,10 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             root=root,
             benchmark=name,
             session_id=session,
-            ks=ks,
-            cutoffs=cutoffs,
             records_path=records_path,
-            make_searcher=factory if (agent_limit is None or agent_limit > 0) else None,
-            agent_limit=agent_limit,
-            seed=seed,
+            make_searcher=factory,
         )
-        summ = summarize_legalbench_records(records_path, ks, cutoffs)
+        summ = summarize_legalbench_records(records_path)
         per_benchmark[name] = {
             "n_queries": summ["n_queries"],
             "n_agent": summ["n_agent"],
@@ -266,17 +245,12 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
         n_instances += summ["n_queries"]
         n_errors += summ["n_searcher_error"]
         m = summ["metrics"]
-        # 字符级（官方口径，主指标）：同一次检索按 cutoff 截断后的字符重叠 P/R/F1
-        print(f"  [span] " + "  ".join(
-            f"@{c}: R={m.get(f'span_recall_at_{c}', 0):.3f} "
-            f"P={m.get(f'span_precision_at_{c}', 0):.3f} "
-            f"F1={m.get(f'span_f1_at_{c}', 0):.3f}"
-            for c in cutoffs))
-        # 文档级（本系统扩展）：top-k 命中文档占比 + MRR
-        print(f"  [doc@k] " + "  ".join(f"R@{k}={m.get(f'doc_recall_at_{k}', 0):.3f}" for k in ks)
-              + f"  MRR={m.get('doc_mrr', 0):.3f}")
-        if "agent_span_f1" in m:
-            print(f"  [agent] agent_span_f1={m['agent_span_f1']:.3f}")
+        # 仅 Searcher 链路指标（确定性混合检索已移除）：
+        # 文档覆盖率（找齐/找准）+ 证据对 gold 区间的字符重叠
+        print(f"  [doc] agent_doc_precision={m.get('agent_doc_precision', 0):.3f}  "
+              f"agent_doc_recall={m.get('agent_doc_recall', 0):.3f}")
+        print(f"  [span] agent_span: P={m.get('agent_span_precision', 0):.3f}  "
+              f"R={m.get('agent_span_recall', 0):.3f}  F1={m.get('agent_span_f1', 0):.3f}")
 
     # 整体聚合：官方口径 = Σ_bench (0.25 × 子任务内均值)，只对本次实际运行的
     # benchmark 归一化（全量 4 个时严格等于官方 0.25 等权）
@@ -294,14 +268,14 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             if vals:
                 overall_metrics[key] = sum(0.25 * v for v in vals) / w_total
 
-    _write_legalbench_outputs(run_dir, eval_cfg, ks, cutoffs, per_benchmark,
+    _write_legalbench_outputs(run_dir, eval_cfg, per_benchmark,
                               overall_metrics, n_instances, n_errors, n_resumed, args)
     print(f"\n[legalbenchrag] 完成，输出目录: {run_dir}")
     return 0
 
 
-def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
-                              cutoffs: list[int], per_benchmark: dict,
+def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict,
+                              per_benchmark: dict,
                               overall_metrics: dict,
                               n_instances: int, n_errors: int, n_resumed: int,
                               args: argparse.Namespace) -> None:
@@ -311,17 +285,14 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
         "started_at": started_at,
         "finished_at": now_iso(),
         "config": {
-            "k": ks,  # 文档级 R@k 的 k（本系统扩展）
-            "cutoffs": cutoffs,  # 字符级 span 指标 cutoff（官方 PAKTON 口径）
-            "agent_limit": args.agent_limit,
-            "seed": _seed(args, eval_cfg),
             "legalbench_root": str(args.legalbench_root),
             "benchmarks": list(per_benchmark),
+            "request_set": args.request_set,
         },
         "口径说明": {
-            "span_*_at_{c}": "字符级区间指标（官方 PAKTON 主口径）：同一次检索按排名截断前 c 个 chunk，与 gold 字符区间做重叠 P/R/F1",
-            "doc_recall_at_{k}/doc_mrr": "文档级指标（本系统扩展）：top-k 命中文档占比与 MRR",
-            "agent_span_*": "LLM Searcher 证据（恢复的完整条款）与 gold 区间的字符重叠（本系统扩展）",
+            "agent_doc_precision/recall": "Searcher 证据文档覆盖率（本系统扩展）：证据命中的 gold 相关文档占比 / gold 相关文档被覆盖比例（找准/找齐，文档层）",
+            "agent_span_*": "Searcher 证据（恢复的完整条款）与 gold 字符区间的重叠 P/R/F1（官方 PAKTON 区间口径）",
+            "链路说明": "LegalBenchRAG 仅跑完整 Searcher 链路（确定性混合检索已移除），每条 query 都经 Searcher 检索",
             "整体聚合": "overall = Σ_bench(0.25 × 子任务内均值)，对本次实际运行的 benchmark 归一化（全量 4 个子任务时严格等于官方 0.25 等权）",
         },
         "metrics": overall_metrics,
@@ -333,10 +304,9 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
     }
     write_json(run_dir / "summary.json", summary)
 
-    # metrics.csv：宽表（每 benchmark 一行 + overall 一行）
-    metric_keys = [f"doc_recall_at_{k}" for k in ks] + ["doc_mrr"] + \
-        [f"span_f1_at_{c}" for c in cutoffs] + \
-        ["agent_span_f1"]
+    # metrics.csv：宽表（每 benchmark 一行 + overall 一行），仅 Searcher 链路指标
+    metric_keys = ["agent_doc_precision", "agent_doc_recall",
+                   "agent_span_precision", "agent_span_recall", "agent_span_f1"]
     rows: list[dict] = []
     for name, info in per_benchmark.items():
         row = {"benchmark": name, "n": info.get("n_queries", 0),
@@ -357,11 +327,10 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict, ks: list[int],
 # ContractNLI
 # ---------------------------------------------------------------------------
 def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
-    modules = _init_modules()
-    planner_policy = modules.get("planner_policy") or modules.get("default_policy")
-    from src.contract.planner import Planner
+    from src.core.runner import load_config
 
-    planner = Planner(policy=planner_policy)
+    modules = _init_modules()
+    config = load_config(args.config)
     path = L.find_contractnli_jsonl(args.contractnli_jsonl)
 
     # 可选的预生成请求集合（sampling 模块产物）：只跑列出的实例 / 只入被引用的合同
@@ -379,29 +348,27 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         print(f"[contractnli] 没有可评测的实例（subset={args.subset!r}）")
         return 1
 
-    mode = args.nli_mode or eval_cfg.get("contractnli_mode", "indexed")
     nli_session = args.nli_session or eval_cfg.get("nli_session", "nli-contractnli")
-    top_k = args.nli_top_k if args.nli_top_k is not None else int(eval_cfg.get("contractnli_top_k", 8))
 
-    if mode == "indexed":
-        n_docs = _session_doc_count(nli_session)
-        if n_docs == 0:
-            if args.ingest_nli:
-                print(f"[contractnli] 会话 {nli_session} 为空，自动入库 "
-                      + (f"{len(idx_subset)} 份被采样实例引用的合同（PAKTON 对齐）" if idx_subset else "distinct 合同")
-                      + " ...")
-                from src.contract.eval.ingest_raw import ingest_contractnli_jsonl
-                ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)),
-                                         idx_subset=idx_subset,
-                                         max_tokens=eval_cfg.get("ingest_max_tokens"),
-                                         min_tokens=int(eval_cfg.get("ingest_min_tokens", 50)),
-                                         overlap_tokens=int(eval_cfg.get("ingest_overlap_tokens", 50)))
-            else:
-                print(f"[contractnli] 会话 {nli_session} 无合同入库（indexed 模式需要全库）。")
-                print("  请先手动入库（不会自动执行）:  python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl/zip> --session " + nli_session)
-                print("  或者加 --ingest-nli 让本次自动入库。")
-                return 1
-        print(f"[contractnli] 会话 {nli_session} 合同数 = {_session_doc_count(nli_session)}（indexed：整库入库+检索式）")
+    # 完整链路要求每条实例的合同已在会话中（检索范围 = nli:<premise_id>）
+    n_docs = _session_doc_count(nli_session)
+    if n_docs == 0:
+        if args.ingest_nli:
+            print(f"[contractnli] 会话 {nli_session} 为空，自动入库 "
+                  + (f"{len(idx_subset)} 份被采样实例引用的合同" if idx_subset else "distinct 合同")
+                  + " ...")
+            from src.contract.eval.ingest_raw import ingest_contractnli_jsonl
+            ingest_contractnli_jsonl(path, nli_session, embed=bool(eval_cfg.get("embedding_corpus", True)),
+                                     idx_subset=idx_subset,
+                                     max_tokens=eval_cfg.get("ingest_max_tokens"),
+                                     min_tokens=int(eval_cfg.get("ingest_min_tokens", 50)),
+                                     overlap_tokens=int(eval_cfg.get("ingest_overlap_tokens", 50)))
+        else:
+            print(f"[contractnli] 会话 {nli_session} 无合同入库（完整链路模式需要该合同在场）。")
+            print("  请先手动入库（不会自动执行）:  python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl/zip> --session " + nli_session)
+            print("  或者加 --ingest-nli 让本次自动入库。")
+            return 1
+    print(f"[contractnli] 会话 {nli_session} 合同数 = {_session_doc_count(nli_session)}（完整链路，Refiner 按评测切换 3 选 1 提示词）")
 
     limit = args.limit if args.limit is not None else eval_cfg.get("contractnli_limit")
     seed = _seed(args, eval_cfg)
@@ -410,11 +377,27 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
     records_path = run_dir / "records.jsonl"
     done = load_done_ids(records_path)
 
-    print(f"[contractnli] 总 {len(records)} 条实例（subset={args.subset or 'all'}，mode={mode}），"
+    print(f"[contractnli] 总 {len(records)} 条实例（subset={args.subset or 'all'}，完整链路 + 3 选 1 Refiner 提示词），"
           f"已完成 {len(done)}，本次处理上限 {limit or '全部'}")
-    stats = run_contractnli(records, planner=planner, records_path=records_path,
-                            limit=limit, seed=seed, done_ids=done,
-                            mode=mode, nli_session=nli_session, top_k=top_k)
+
+    # 检索预算 / 实例并行度（CLI 优先，其次 config 的 contract.* 键，最后默认）
+    _contract_cfg = config.get("contract", {}) or {}
+    max_rounds = args.searcher_max_rounds if args.searcher_max_rounds is not None \
+        else int(_contract_cfg.get("searcher_max_search_rounds", 3))
+    max_per_round = args.searcher_max_searches_per_round if args.searcher_max_searches_per_round is not None \
+        else int(_contract_cfg.get("searcher_max_searches_per_round", 1))
+    concurrency = args.nli_concurrency if args.nli_concurrency is not None \
+        else int(eval_cfg.get("nli_concurrency", 2))
+    print(f"[contractnli] Searcher 检索预算 = {max_rounds} 轮 × 每轮 {max_per_round} 问；"
+          f"实例并行度 = {concurrency}")
+
+    stats = run_contractnli_fullchain(records, modules=modules, config=config,
+                                      records_path=records_path,
+                                      limit=limit, seed=seed, done_ids=done,
+                                      nli_session=nli_session, output_dir=str(run_dir),
+                                      concurrency=concurrency,
+                                      searcher_max_rounds=max_rounds,
+                                      searcher_max_searches_per_round=max_per_round)
     summ = summarize_contractnli_records(records_path)
 
     summary = {
@@ -422,7 +405,10 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         "started_at": now_iso(),
         "finished_at": now_iso(),
         "config": {"limit": limit, "seed": seed, "subset": args.subset,
-                   "nli_mode": mode, "nli_session": nli_session, "nli_top_k": top_k,
+                   "nli_session": nli_session,
+                   "searcher_max_search_rounds": max_rounds,
+                   "searcher_max_searches_per_round": max_per_round,
+                   "concurrency": concurrency,
                    "contractnli_jsonl": str(path)},
         "metrics": {k: v for k, v in summ.items() if k not in ("class_counts_true", "class_counts_pred")},
         "class_counts_true": summ.get("class_counts_true", {}),
@@ -439,9 +425,9 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         rows.append({"metric": f"f1_{cls}", "value": round(f1, 4)})
     write_csv(run_dir / "metrics.csv", rows)
 
-    print(f"[contractnli] 本次新增 {stats['evaluated']} 条（累计 {summ['n_total']}，错误 {summ['n_errors']}"
-          + (f"，检索空 {summ['n_indexed_retrieved_zero']}" if mode == "indexed" else "") + "）")
+    print(f"[contractnli] 本次新增 {stats['evaluated']} 条（累计 {summ['n_total']}，错误 {summ['n_errors']}）")
     print(f"[contractnli] accuracy={summ['accuracy']:.4f}  f1_weighted={summ['f1_weighted']:.4f}")
+    print(f"[contractnli] token（估算）: Searcher={summ.get('searcher_token_usage', 0)}  全Agent={summ.get('total_token_usage', 0)}")
     print(f"[contractnli] 输出目录: {run_dir}")
     return 0
 

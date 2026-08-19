@@ -83,7 +83,8 @@ def main() -> None:
 
         _start = _time.time()
         report = asyncio.run(run_research(args.query, config, modules,
-                                          session_id=args.session, doc_ids=doc_ids))
+                                          session_id=args.session, doc_ids=doc_ids,
+                                          output_dir=args.output_dir))
         elapsed = _time.time() - _start
 
         md_text = format_report_markdown(report, elapsed)

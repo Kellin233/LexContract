@@ -2,7 +2,9 @@
 
 两个适配器职责单一：
 - LegalBenchAdapter：LegalBenchRAG query -> Searcher 任务；检索/证据结果 -> (file_path, span) 命中。
-- ContractNLIAdapter：(premise, hypothesis) -> 分类 prompt；原始输出 -> 标签。
+- ContractNLIAdapter（评测专用 Refiner 提示词 + 标签提取）：为 contractNLI 评测提供“3 选 1 标签”
+  的 Refiner 专用提示词（结论字段=精确一个标签词 + supporting_evidence_ids=最相关证据），
+  并从 Refiner 输出的 JSON（structured）里提取最终结论当分类结果。
 
 关键映射：doc_id -> corpus 相对 file_path，把数据库中与 raw 文本对齐的偏移
 映射回 LegalBenchRAG 的 gold 坐标系，交给 metrics 打分。
@@ -168,92 +170,135 @@ class LegalBenchAdapter:
 
 
 # ---------------------------------------------------------------------------
-# ContractNLI 适配器
+# ContractNLI 适配器（按评测切换 Refiner 提示词 + 从 Refiner 输出提取 3 选 1 标签）
 # ---------------------------------------------------------------------------
 
 _LABELS = ("entailment", "contradiction", "neutral")
 
-CONTRACTNLI_PROMPT = """\
-You are a legal expert. Judge whether the HYPOTHESIS is entailed by, contradicted by, or neutral with respect to the CONTRACT PREMISE.
+# PAKTON responseChecker 式同义词表（PAKTON-raw .../huggingfaceDatasets.py:283-287）
+_LABEL_SYNONYMS = {
+    "entailment": {"entailment", "entailed", "entailing", "entails"},
+    "contradiction": {"contradiction", "contradictory", "contradicts", "contradicting", "contradicted"},
+    "neutral": {"neutral"},
+}
 
-- "entailment": the premise necessarily implies the hypothesis.
-- "contradiction": the premise necessarily contradicts the hypothesis.
-- "neutral": neither entailment nor contradiction can be determined.
+# ContractNLI 评测专用的 Refiner 系统提示词（3 选 1 标签 + 最相关证据）。
+# “结论字段 = 精确一个标签词，supporting_evidence_ids = 最相关证据”。
+# 正式生产链路不注入它，Refiner 保持默认生产提示词（见 refiner.py system_prompt 参数）。
+# 边界口径对齐 PAKTON-raw（.../huggingfaceDatasets.py get_prompt_generator）：entailment 限于
+# 显式/直接改写，neutral 为信息不足时的默认；并针对“宽泛措辞(regardless of form/media…)被推成
+# entailment”的过推偏差加了罚则与反例。
+CONTRACTNLI_REFINER_SYSTEM_PROMPT = """\
+You are the final contract-NLI verifier. You have verified ORIGINAL contract clauses (evidence) and a HYPOTHESIS about the contract. Decide how the HYPOTHESIS relates to the EVIDENCE, and output the label in `conclusion`.
+
+Pick EXACTLY one label:
+- "entailment": the contract EXPLICITLY supports the hypothesis, or the hypothesis is a DIRECT, near-surface paraphrase of what the contract states (including a single inference step from an explicit clause). If supporting it requires multi-step inference or relies only on broad/general wording, it is NOT entailment.
+- "contradiction": the contract explicitly contradicts the hypothesis (a clause DIRECTLY conflicts with the claim).
+- "neutral": the contract does not mention the hypothesis, or there is insufficient evidence to decide either way. This is the DEFAULT when the evidence does not explicitly or directly address the specific claim.
+
+HOW TO READ THE HYPOTHESIS (critical):
+- Read the hypothesis as ONE overall claim, not as separate sub-claims that must each appear verbatim.
+- An existential/partial hypothesis ("some X MAY be done", "could share SOME information with SOME parties", "some obligations MAY survive") is ENTAILED if the contract supports the claim for any category within its terms — you do NOT need every enumerated example to appear word-for-word. Do NOT misread an existential claim as a universal one.
+- A "survival" hypothesis is ENTAILED if the contract provides obligations that endure after termination (e.g. a continuing confidentiality duty), even if the word "survive" never appears.
+
+BOUNDARY RULES:
+1. Base the decision ONLY on the verified evidence. Never import external facts.
+2. NEUTRAL is the default when the contract text does not explicitly (or by direct paraphrase) make the claim. Do NOT stretch entailment by reading general catch-all language ("regardless of form/format/media", "any manner", "all times", etc.) as entailing a SPECIFIC claim the contract never addresses (e.g. "verbal disclosure") — such specific unmentioned claims stay NEUTRAL.
+3. A single-step paraphrase or the existential reading above is entailment; adding multiple unstated assumptions is not.
+4. When it could be argued either way, read the hypothesis at face value: if the face-value claim is covered by the clause, prefer "entailment"; if deciding would require reading specific words INTO the clause, prefer "neutral".
+5. Cite evidence ONLY by its ID in brackets, e.g. [E001]. NEVER invent article numbers.
+6. `supporting_evidence_ids`: the evidence that MOST supports your label — the most relevant subset, not all.
+7. `points`: the supporting breakdown, each backed by its evidence IDs.
+8. `evidence_gap`: what could not be confirmed from this document set (list concrete missing info when NEUTRAL).
+
+EXAMPLES:
+- ENTAILMENT (direct paraphrase of an explicit obligation):
+  Contract: "...the Receiving Party shall not disclose Confidential Information to any third party..."
+  Hypothesis: "The Receiving Party is prohibited from sharing confidential information with third parties."
+  => "entailment"
+- ENTAILMENT (existential "some" — permitted for a category within the hypothesis's scope):
+  Contract: "...the Receiving Party may disclose Confidential Information to external consultants on a need-to-know basis..."
+  Hypothesis: "The Receiving Party may share some Confidential Information with some third parties (including consultants and professional advisors)."
+  => "entailment" (the contract allows at least one category in scope, e.g. consultants)
+- ENTAILMENT (survival implied by an enduring obligation):
+  Contract: "...the confidentiality obligations shall continue in force for five years after termination of this Agreement..."
+  Hypothesis: "Some obligations of the Agreement may survive termination of the Agreement."
+  => "entailment"
+- NEUTRAL (catch-all language does NOT entail a specific unmentioned claim):
+  Contract: "...shall keep Confidential Information confidential and shall not disclose it regardless of the form, format, or media..."
+  Hypothesis: "The Receiving Party may not disclose information that was conveyed verbally."
+  => "neutral" (the clause never mentions verbal/oral disclosure)
+- NEUTRAL (unrelated):
+  Contract: "...the Receiving Party shall not disclose Confidential Information to any third party..."
+  Hypothesis: "The Receiving Party may work remotely during the term."
+  => "neutral"
+- CONTRADICTION (direct conflict):
+  Contract: "...the Receiving Party shall disclose Confidential Information to authorized personnel..."
+  Hypothesis: "The Receiving Party is not allowed to disclose Confidential Information under any circumstances."
+  => "contradiction"
 
 Output STRICT JSON only:
-{{"label": "entailment" | "contradiction" | "neutral", "reasoning": "one sentence"}}
-
-## CONTRACT PREMISE
-{premise}
-
-## HYPOTHESIS
-{hypothesis}
-"""
-
-RETRIEVAL_PROMPT = """\
-You are a legal expert. Judge whether the HYPOTHESIS is entailed by, contradicted by, or neutral with respect to the CONTRACT.
-
-Below are passages extracted from the contract that are likely relevant to the hypothesis (original text, with character offsets into the contract). Base your decision ONLY on this contract content.
-
-- "entailment": the contract necessarily implies the hypothesis.
-- "contradiction": the contract necessarily contradicts the hypothesis.
-- "neutral": neither entailment nor contradiction can be determined.
-
-Output STRICT JSON only:
-{{"label": "entailment" | "contradiction" | "neutral", "reasoning": "one sentence"}}
-
-## RELEVANT CONTRACT PASSAGES
-{passages}
-
-## HYPOTHESIS
-{hypothesis}
-"""
+{{
+  "conclusion": "entailment" | "contradiction" | "neutral",
+  "points": [{{"claim": "supporting point", "evidence_ids": ["E001", "E002"]}}],
+  "supporting_evidence_ids": ["E001", "E003"],
+  "evidence_gap": ["what could not be confirmed"],
+  "notes": "additional notes"
+}}
+ONLY the JSON object, no prose."""
 
 
 def _normalize_label(text: str) -> str | None:
     s = (text or "").strip().lower()
+    if not s:
+        return None
+    # 直接词匹配（\b 避免把 neutral 匹配进 neutrally）
     for lab in _LABELS:
-        if s == lab or s.startswith(lab) or lab in s:
+        if re.search(rf"\b{lab}\b", s):
+            return lab
+    # 同义词词级匹配（对齐 PAKTON responseChecker）
+    tokens = set(re.findall(r"[a-z]+", s))
+    for lab, syns in _LABEL_SYNONYMS.items():
+        if tokens & syns:
             return lab
     return None
 
 
 class ContractNLIAdapter:
-    """把 (premise, hypothesis) 适配为分类 prompt，并把输出解析为标签。
+    """按评测切换 Refiner 提示词 + 从 Refiner 输出提取 3 选 1 标签。
 
-    mode:
-      - direct：整段前提进 prompt（等价 PAKTON 的 naive zero-shot baseline）；
-      - indexed：先把合同入库并从库里检索出相关条款，把检索到的条款（原文+偏移）
-        送进 prompt（对齐 PAKTON 的“文档内检索”口径，也更省 token）。
+    定位：contractNLI 评测把 Refiner 换成本类的评测专用提示词（结论=标签词）；
+    评测从 Refiner 输出的 JSON（structured）提结论当分类结果，不额外再开一次 LLM。
     """
 
     @staticmethod
-    def build_prompt(premise: str, hypothesis: str) -> str:
-        return CONTRACTNLI_PROMPT.format(premise=premise, hypothesis=hypothesis)
+    def refiner_system_prompt() -> str:
+        """ContractNLI 评测专用的 Refiner 系统提示词（结论 = 3 选 1 标签 + 最相关证据）。"""
+        return CONTRACTNLI_REFINER_SYSTEM_PROMPT
 
     @staticmethod
-    def build_retrieval_prompt(chunks: list[dict], hypothesis: str) -> str:
-        """chunks: DocumentToolkit.search 返回的行（含 text/charspan）。"""
-        passages: list[str] = []
-        for i, c in enumerate(chunks, 1):
-            text = str(c.get("text", "")).strip()
-            if not text:
-                continue
-            span = c.get("charspan") or []
-            loc = f" (offset {span[0]}-{span[1]})" if len(span) == 2 else ""
-            passages.append(f"[{i}]{loc} {text}")
-        return RETRIEVAL_PROMPT.format(
-            passages="\n\n".join(passages) or "(no passages retrieved)",
-            hypothesis=hypothesis,
-        )
+    def extract_chain_label(structured: dict) -> tuple[str | None, str]:
+        """从正式链路 Refiner 的 structured（RefinerResult JSON）提取 (label, reasoning)。
 
-    @staticmethod
-    def system_prompt() -> str:
-        return "You are a legal text classification assistant. Output valid JSON only."
+        label = conclusion（评测提示词使其为精确一个标签词），PAKTON 同义词正则归一；
+        reasoning = points 前两条 claim（退化到 conclusion 原文）。
+        """
+        if not isinstance(structured, dict):
+            return None, ""
+        label = _normalize_label(str(structured.get("conclusion", "")))
+        if label is None:
+            label = _normalize_label(json.dumps(structured, ensure_ascii=False))
+        claims = [
+            str(p.get("claim", "")).strip()
+            for p in (structured.get("points") or [])
+            if isinstance(p, dict) and str(p.get("claim", "")).strip()
+        ]
+        reasoning = "；".join(claims[:2]) if claims else str(structured.get("conclusion", ""))
+        return label, reasoning
 
     @staticmethod
     def parse_data(data) -> tuple[str | None, str]:
-        """从已解析的 dict（如 Planner.solve 的返回值）提取 (label, reasoning)。"""
+        """从已解析的 dict 提取 (label, reasoning)。"""
         if not isinstance(data, dict):
             return None, ""
         label = _normalize_label(str(data.get("label", "")))

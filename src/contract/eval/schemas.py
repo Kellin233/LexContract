@@ -36,6 +36,7 @@ class LegalQueryRecord(BaseModel):
     searcher_error: Optional[str] = None
     prompt: str = ""  # agent 模式下的 prompt（用于留存）
     raw_response: str = ""  # agent 原始输出
+    searcher_trajectory: list = Field(default_factory=list)  # agent 结构化完整轨迹（含 tool 调用）
     telemetry: dict = Field(default_factory=dict)
     elapsed_s: float = 0.0
 
@@ -51,9 +52,9 @@ class NliRecord(BaseModel):
     gold_label: str
     pred_label: Optional[str] = None  # entailment/contradiction/neutral 或 None(解析失败)
     pred_valid: bool = True  # True=解析出合法标签；False=记录为错误样例(-1)
-    mode: str = "direct"  # direct=整段前提直喂；indexed=整库入库+检索式
-    doc_id: str = ""  # indexed 模式下对应的合同 doc_id
-    retrieved_n: int = 0  # indexed 模式下检索到的条款片段数
+    mode: str = "fullchain"  # fullchain=完整链路(Planner→Searcher→Reviewer→Refiner)+3选1 Refiner 提示词
+    doc_id: str = ""  # 对应合同 doc_id（fullchain 下为 nli:<premise_id>）
+    retrieved_n: int = 0  # legacy indexed 模式字段（fullchain 用 telemetry.n_evidence）
     retrieved_chunks: list = Field(default_factory=list)  # [{id, text_preview, span, score}]
     prompt: str = ""
     raw_response: str = ""

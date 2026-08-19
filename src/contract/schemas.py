@@ -51,6 +51,7 @@ class Evidence(BaseModel):
     retrieval_score: float = Field(default=0.0)
     relevance_note: str = Field(default="", description="Worker 对相关性的解释（辅助理解，不作引用）")
     verified: bool = Field(default=False, description="是否通过 CitationVerifier 校验")
+    verify_note: str = Field(default="", description="校验失败原因的机器可读说明（成功后为空串；供评测记录统计丢弃分布）")
 
 
 class ResearchQuestion(BaseModel):
@@ -71,6 +72,10 @@ class WorkerResult(BaseModel):
     search_queries: list[str] = Field(default_factory=list)
     searched: bool = False
     no_evidence_found: bool = False
+    drop_reasons: dict[str, int] = Field(
+        default_factory=dict,
+        description="候选转证据时的丢弃原因计数（materialize-fail 或 verify_note 类名），供评测观测",
+    )
 
 
 class MissingAspect(BaseModel):

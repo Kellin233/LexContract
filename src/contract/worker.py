@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections import Counter
 from typing import Any
 
 from .assembler import EvidenceAssembler
@@ -19,6 +20,8 @@ from .tools import DocumentToolkit
 from .verifier import CitationVerifier
 from ..agents.base_agent import BaseAgent
 from ..orchestrator.schemas import SubTask, AgentResult, AgentStatus
+from ..utils.conversation_recorder import set_agent
+from ..utils.tokens import estimate_messages_tokens, append_token_usage
 from ..utils.tracing import trace_agent
 
 
@@ -26,22 +29,38 @@ __all__ = ["Searcher"]
 
 # 总工具轮次上限：给"发检索词"、"展开原文"、"输出最终 JSON"都留轮次
 MAX_TURNS = 5
-# 发检索词的轮次上限（用户口径：Searcher 最多生成 3 轮问题）
+# 发检索词的轮次上限（默认：最多 3 轮，每轮 1 个检索词 → 最多 3 个检索词；可由配置覆盖）
 MAX_SEARCH_ROUNDS = 3
-# 单轮内最多发起的 search 次数（检索词上限），3 轮 × 3 个 = 最多 9 个检索词
-MAX_SEARCHES_PER_ROUND = 3
+MAX_SEARCHES_PER_ROUND = 1
 
-SYSTEM_PROMPT = """\
+# 检索类工具：共享同一检索预算（总轮数 + 每轮检索调用数）。"search" 是拆分为三工具前的旧名，保留兼容。
+_RETRIEVAL_TOOLS = frozenset({
+    "search",
+    "search_vector",
+    "search_bm25",
+    "search_hybrid",
+    "grep",
+})
+
+
+def build_system_prompt(max_rounds: int, max_searches_per_round: int) -> str:
+    """Searcher 系统提示词；检索预算随 max_rounds / 每轮检索调用数 动态写入，避免提示词与配置不一致。"""
+    rounds_txt = (f"at most {max_rounds} ROUNDS may issue retrieval calls"
+                  if max_rounds != 1 else "only 1 ROUND may issue retrieval calls")
+    per_round = (f"1 retrieval call" if max_searches_per_round == 1
+                 else f"up to {max_searches_per_round} retrieval calls")
+    return f"""\
 You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to locate and capture the ORIGINAL clauses of the contract documents relevant to the research question.
 
 CRITICAL RULES:
 1. NEVER interpret, judge, summarize, or reach conclusions about the contract. Only collect original text.
-2. Use the retrieval tools to find clauses. Start with `search` (try synonyms if nothing useful: e.g. termination / rescission / unilateral termination / early termination).
-3. When a hit is a fragment, use `get_context` to expand around it, or `get_section` to fetch the complete clause by section_path, or `get_document_outline` to locate where a clause is.
-4. Follow internal cross-references: if a clause says "except as provided in Article X" / "subject to Section X", call `get_referenced_section` to also capture that section.
-5. Collect ALL clauses that bear on the research question — do not stop at the first hit.
-6. You have a HARD BUDGET: at most 3 ROUNDS may issue `search` calls, and at most 3 `search` calls per such round. Choose search queries wisely (cover the key synonyms early); expansion via get_context/get_section and the final JSON reply do not count against search rounds.
-7. For each captured clause, report its precise offsets (use the start_offset/end_offset shown by `get_section` / chunks) and the source chunk ids.
+2. Use the retrieval tools to find clauses. IMPORTANT: a clause may be named in the question by a CANONICAL LABEL or standard term that does NOT appear verbatim in the contract (e.g. the "Regulatory Approvals" clause may be titled "Reasonable Best Efforts; Filings", the "Specific Performance" clause may be titled "Enforcement"). To locate a clause by its name, ALWAYS PREFER SEMANTIC search (search_hybrid / search_vector) using the issue's MEANING or synonyms (e.g. regulatory approvals / filings / consents / authorizations; specific performance / enforcement / equitable relief / irreparable harm); use grep (literal or regex) mainly to CONFIRM exact wording or to pin a precise article number. Try synonyms if nothing useful (e.g. termination / rescission / unilateral termination / early termination).
+3. When you have identified the target document, lock later search_*/grep calls to it by passing `doc_id=...` — otherwise hits mix passages from ALL documents in the corpus. CRITICAL: corpus doc_ids are long, opaque strings (e.g. "maud:VEREIT_Realty_Income_Corporation.pdf||VEREIT_Realty_Income_Corporation Amendment No.1.txt"); NEVER guess or reconstruct a doc_id from a title. Only pass a doc_id you have SEEN verbatim in a previous tool result. If a doc_id-locked search returns [], the id was wrong — re-search WITHOUT `doc_id` using a party-name query (e.g. "VEREIT Realty Income specific performance") to surface the correct document.
+4. Once a relevant clause is located, call `get_document_outline` / `get_section` to capture the COMPLETE original clause text (by section_path or by section offsets); use `get_context` to expand a truncated fragment around a hit. The evidence you return must be full clauses, never fragments.
+5. Follow internal cross-references: if a clause says "except as provided in Article X" / "subject to Section X", call `get_referenced_section` to also capture that section.
+6. Collect ALL clauses that bear on the research question — do not stop at the first hit.
+7. You have a HARD BUDGET on retrieval calls (search_hybrid / search_vector / search_bm25 / grep ALL count): {rounds_txt}, with {per_round} per such round. Choose queries wisely (cover the key synonyms early; prefer semantic search for clause names); expansion via get_context/get_section and the final JSON reply do not count against the budget.
+8. For each captured clause, report the precise offsets, doc_id and source chunk ids EXACTLY as shown by `get_section` / search / grep results. Never invent or guess a chunk id (e.g. ":0"), a doc_id, or an offset: copy them verbatim from a tool result. An item that exists only in the document outline is NOT evidence until you have retrieved its full text with `get_section` (or expanded it with `get_context`) — do not report outline-only sections as captured clauses.
 
 FINAL OUTPUT FORMAT (must be the last assistant message, JSON only — an array, may be empty):
 [
@@ -102,6 +121,9 @@ class Searcher(BaseAgent):
         verifier: CitationVerifier,
         store: EvidenceStore,
         max_turns: int = MAX_TURNS,
+        dedup_tool_results: bool = True,
+        max_search_rounds: int = MAX_SEARCH_ROUNDS,
+        max_searches_per_round: int = MAX_SEARCHES_PER_ROUND,
     ) -> None:
         super().__init__(name, policy, tools=toolkit.get_tools())
         self.toolkit = toolkit
@@ -109,12 +131,25 @@ class Searcher(BaseAgent):
         self.verifier = verifier
         self.store = store
         self.max_turns = max_turns
+        self.dedup_tool_results = dedup_tool_results
+        self.max_search_rounds = max(1, int(max_search_rounds))
+        self.max_searches_per_round = max(1, int(max_searches_per_round))
+        self.system_prompt = build_system_prompt(self.max_search_rounds, self.max_searches_per_round)
         self.tool_map: dict[str, Any] = {t.name: t for t in (self.tools or [])}
+        # 运行期已见集合（每次 run 重置；Searcher 由对象池复用，绝不能跨 run 残留）
+        self._seen_chunk_ids: set[str] = set()
+        self._seen_sections: set[tuple[str, tuple]] = set()
+        self._deduped_count = 0
 
     @trace_agent(name="searcher.run", tags=["contract", "worker"])
     async def run(self, task: SubTask, context: dict) -> AgentResult:
         question = task.description or context.get("question", "")
         question_id = task.task_id
+        set_agent(f"searcher/{question_id}")
+        # 每次运行重置去重状态（对象池可能复用本实例）
+        self._seen_chunk_ids.clear()
+        self._seen_sections.clear()
+        self._deduped_count = 0
         doc_hints = list(task.search_hints or context.get("doc_hints") or [])
 
         # 对象池可能跨运行复用本实例：每次运行按 context 重新绑定作用域与证据库
@@ -129,7 +164,7 @@ class Searcher(BaseAgent):
 
         task_desc = self._build_task_prompt(question, doc_hints, context)
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": task_desc},
         ]
 
@@ -158,9 +193,9 @@ class Searcher(BaseAgent):
                 messages.append({
                     "role": "user",
                     "content": (
-                        "You must call a retrieval tool now (search / get_context / get_section / "
-                        "get_referenced_section) to gather evidence. Do not stop without evidence "
-                        "or without a valid JSON array."
+                        "You must call a retrieval tool now (search_vector / search_bm25 / search_hybrid / "
+                        "grep / get_context / get_section / get_referenced_section) to gather evidence. "
+                        "Do not stop without evidence or without a valid JSON array."
                     ),
                 })
 
@@ -190,7 +225,10 @@ class Searcher(BaseAgent):
 
             content = response.get("content", "") or ""
             tool_calls = response.get("tool_calls", []) or []
-            total_tokens += len(json.dumps(messages, ensure_ascii=False)) // 3
+            # token 口径统一（src/utils/tokens.py）；每轮对该消息数组估算，语义维持原样
+            _delta_tokens = estimate_messages_tokens(messages)
+            total_tokens += _delta_tokens
+            append_token_usage(_delta_tokens)  # 计入本轮"所有 Agent"token 账本
 
             trajectory.append({"turn": turn, "role": "assistant", "content": content,
                                "tool_calls": [dict(tc) for tc in tool_calls]})
@@ -206,32 +244,35 @@ class Searcher(BaseAgent):
                         args = json.loads(func.get("arguments", "{}"))
                     except json.JSONDecodeError:
                         args = {}
-                    if tool_name == "search":
-                        # 检索轮数（发 search 的轮）已用满：不再执行 search（允许 get_section 等继续）
-                        if search_rounds_used >= MAX_SEARCH_ROUNDS:
-                            note = {"error": f"Search-round budget exhausted ({MAX_SEARCH_ROUNDS} rounds); this search was skipped "
-                                             f"(you may still use get_section/get_context to expand existing hits): "
-                                             f"{str(args.get('query', ''))[:50]}"}
+                    if tool_name in _RETRIEVAL_TOOLS:
+                        # 检索轮数（发检索调用的轮）已用满：不再执行 search_*/grep（允许 get_section 等继续）
+                        if search_rounds_used >= self.max_search_rounds:
+                            _q = str(args.get("pattern") or args.get("query", ""))[:50]
+                            note = {"error": f"Search-round budget exhausted ({self.max_search_rounds} rounds); this search was skipped "
+                                             f"(you may still use get_section/get_context to expand existing hits): {_q}"}
                             trajectory.append({"turn": turn, "role": "tool",
                                                "tool_call_id": tc.get("id", ""), "name": tool_name,
                                                "result": note})
                             results.append({"tool_call_id": tc.get("id", ""), "name": tool_name, "result": note})
                             continue
-                        # 单轮内 search 次数超限：不执行，回显提示
-                        if turn_search_count >= MAX_SEARCHES_PER_ROUND:
-                            note = {"error": f"At most {MAX_SEARCHES_PER_ROUND} search queries per round; this search was skipped: "
-                                             f"{str(args.get('query', ''))[:50]}"}
+                        # 单轮内检索调用数超限：不执行，回显提示
+                        if turn_search_count >= self.max_searches_per_round:
+                            _q = str(args.get("pattern") or args.get("query", ""))[:50]
+                            note = {"error": f"At most {self.max_searches_per_round} retrieval calls per round; this call was skipped: "
+                                             f"{_q}"}
                             trajectory.append({"turn": turn, "role": "tool",
                                                "tool_call_id": tc.get("id", ""), "name": tool_name,
                                                "result": note})
                             results.append({"tool_call_id": tc.get("id", ""), "name": tool_name, "result": note})
                             continue
                     result = await self._execute_tool(tool_name, args)
-                    if tool_name == "search":
+                    if self.dedup_tool_results:
+                        result = self._dedup_tool_result(tool_name, result)
+                    if tool_name in _RETRIEVAL_TOOLS:
                         turn_search_count += 1
                         searched = True
                         search_count += 1
-                        q = str(args.get("query", "")).strip()
+                        q = str(args.get("pattern") or args.get("query", "")).strip()
                         if q and q not in search_queries:
                             search_queries.append(q)
                     trajectory.append({"turn": turn, "role": "tool",
@@ -274,6 +315,10 @@ class Searcher(BaseAgent):
         if candidates is None:
             candidates = []
 
+        if self._deduped_count:
+            print(f"[Searcher/{question_id}] dedup {self._deduped_count} repeated chunk/section texts "
+                  f"(tool-result dedup on: {self.dedup_tool_results})")
+
         worker_result = self._assemble_worker_result(
             candidates, question_id, question, searched, search_queries, store
         )
@@ -289,6 +334,50 @@ class Searcher(BaseAgent):
     # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
+    def _dedup_tool_result(self, tool_name: str, result: Any) -> Any:
+        """去掉本 Searcher 已注入过的完整原文（保留身份/偏移/得分骨架）。
+
+        按工具返回形态分派；只替换 text 为短标记，quote 由 EvidenceAssembler
+        从 DB 按偏移物化，与 tool message 的 text 无关，故不影响证据正确性。
+        """
+        if not self.dedup_tool_results:
+            return result
+        if tool_name in ("search", "search_vector", "search_bm25", "search_hybrid",
+                         "grep", "get_context") and isinstance(result, list):
+            return [self._dedup_chunk_item(item) for item in result]
+        if tool_name == "get_chunk":
+            return self._dedup_chunk_item(result)
+        if tool_name in ("get_section", "get_referenced_section"):
+            return self._dedup_section_item(result)
+        return result
+
+    def _dedup_chunk_item(self, item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        cid = item.get("id")
+        if not cid or not isinstance(item.get("text"), str):
+            return item
+        if cid in self._seen_chunk_ids:
+            item["text"] = f"[already shown earlier — chunk {cid}; full text omitted]"
+            self._deduped_count += 1
+        else:
+            self._seen_chunk_ids.add(cid)
+        return item
+
+    def _dedup_section_item(self, item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        path = item.get("section_path")
+        if not isinstance(path, list) or not path or not isinstance(item.get("text"), str):
+            return item
+        key = (str(item.get("doc_id", "")), tuple(path))
+        if key in self._seen_sections:
+            item["text"] = f"[already shown earlier — section {path[-1]}; full text omitted]"
+            self._deduped_count += 1
+        else:
+            self._seen_sections.add(key)
+        return item
+
     def _assemble_worker_result(self, candidates: list, question_id: str, question: str,
                                 searched: bool, search_queries: list[str],
                                 store: "EvidenceStore | None" = None) -> WorkerResult:
@@ -306,16 +395,20 @@ class Searcher(BaseAgent):
             searched=searched,
             no_evidence_found=False,
         )
+        drop_reasons: Counter = Counter()
         for cand in candidates:
             if not isinstance(cand, dict):
                 continue
             ev = self.assembler.materialize(cand, question_id)
             if ev is None:
+                drop_reasons["materialize-fail"] += 1
                 continue
             if not self.verifier.verify(ev):
+                drop_reasons[ev.verify_note or "verify-fail"] += 1
                 continue  # 原文校验失败，丢弃
             registered, _ = store.register(ev, question_id)
             result.evidences.append(registered)
+        result.drop_reasons = dict(drop_reasons)
         result.no_evidence_found = result.searched and not result.evidences
         return result
 

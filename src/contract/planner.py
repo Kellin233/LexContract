@@ -12,6 +12,8 @@ import re
 from typing import Any
 
 from .schemas import ResearchQuestion, ResearchState, QuestionStatus
+from ..utils.conversation_recorder import set_agent
+from ..utils.tokens import append_token_usage, estimate_messages_tokens
 from ..utils.tracing import trace_chain
 
 
@@ -129,6 +131,7 @@ class Planner:
     @trace_chain(name="planner.initial_plan", tags=["contract", "planner"])
     def initial_plan(self, question: str) -> list[ResearchQuestion]:
         """首次规划：拆解调查要点。"""
+        set_agent("planner/initial_plan")
         prompt = INITIAL_PLAN_PROMPT.format(question=question)
         questions = self._call(prompt)
         if questions:
@@ -136,27 +139,10 @@ class Planner:
         # 降级：直接把原问题当作唯一调查目标
         return [ResearchQuestion(question_id="Q1", question=question)]
 
-    @trace_chain(name="planner.solve", tags=["contract", "planner", "nli"])
-    def solve(self, prompt: str, system_prompt: str | None = None) -> dict | None:
-        """通用执行：调用 LLM 并稳健解析 JSON（供 ContractNLI 分类等评测复用）。
-
-        - LLM 调用失败：抛 PlanParseError（由调用方决定如何记为错误样例）；
-        - 输出无法解析出 JSON 对象：返回 None（调用方记为标签解析失败）。
-        """
-        messages = [
-            {"role": "system", "content": system_prompt or "You are a legal text classification assistant. Output valid JSON only."},
-            {"role": "user", "content": prompt},
-        ]
-        try:
-            response = self.policy(messages)
-        except RuntimeError as e:
-            raise PlanParseError(f"LLM call failed: {e}") from e
-        content = response.get("content", "") or ""
-        return _extract_json_object(content)
-
     @trace_chain(name="planner.incremental_plan", tags=["contract", "planner"])
     def incremental_plan(self, state: ResearchState) -> list[ResearchQuestion]:
         """增量规划：只补缺失要点。"""
+        set_agent("planner/incremental_plan")
         next_seq = len(state.questions) + 1
         completed = "\n".join(
             f"- Q{q.question_id}: {q.question}"
@@ -209,6 +195,7 @@ class Planner:
             {"role": "system", "content": "You are a contract research planning assistant. Output valid JSON only."},
             {"role": "user", "content": prompt},
         ]
+        append_token_usage(estimate_messages_tokens(messages))  # 计入本轮全链路 token 账本
         try:
             response = self.policy(messages)
         except RuntimeError as e:

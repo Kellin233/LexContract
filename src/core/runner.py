@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from itertools import count
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,9 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# 对话留档 run_id 唯一序号（进程内递增；并发 run 同秒同查询时避免会话碰撞）
+_CONV_RUN_SEQ = count(1)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +84,10 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
         if backend_name in backend_sampling:
             kwargs.update(backend_sampling[backend_name])
         kwargs.update(backend_sampling.get("modules", {}).get(module_name, {}))
+        # 每后端上下文窗口（token），model.context_window_tokens 覆盖默认
+        cw = model_cfg.get("context_window_tokens", {}).get(backend_name)
+        if cw:
+            kwargs["max_context_tokens"] = int(cw)
         return kwargs
 
     default_kwargs = _get_sampling_kwargs("default", default_backend)
@@ -113,6 +121,7 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     modules["evidence_store"] = EvidenceStore()
 
     def _make_searcher():
+        _contract_cfg = config.get("contract", {})
         return Searcher(
             name="searcher",
             policy=modules.get("solver_policy", default_policy),
@@ -120,6 +129,9 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
             assembler=assembler,
             verifier=verifier,
             store=modules["evidence_store"],  # 运行期由 context 覆盖为每轮独立 EvidenceStore
+            dedup_tool_results=_contract_cfg.get("searcher_dedup_tool_results", True),
+            max_search_rounds=_contract_cfg.get("searcher_max_search_rounds", 3),
+            max_searches_per_round=_contract_cfg.get("searcher_max_searches_per_round", 1),
         )
 
     # ------------------------------------------------------------------
@@ -133,7 +145,10 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
 
     planner = Planner(policy=modules.get("planner_policy", default_policy))
     reviewer = Reviewer(policy=modules.get("judge_policy", default_policy))
-    refiner = Refiner(policy=modules.get("summarizer_policy", default_policy))
+    refiner = Refiner(
+        policy=modules.get("summarizer_policy", default_policy),
+        input_token_budget=config.get("contract", {}).get("refiner_input_token_budget", 65536),
+    )
     modules["planner"] = planner
     modules["reviewer"] = reviewer
     modules["refiner"] = refiner
@@ -164,6 +179,12 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
         memory_store=memory_store,
     )
     modules["orchestrator"] = orchestrator
+
+    # 对话留档开关（configs/default.yaml 的 conversation.enabled，默认关闭）
+    from src.utils.conversation_recorder import recorder as _conv_recorder
+    _conv_recorder.enabled = bool(config.get("conversation", {}).get("enabled", False))
+    logger.info(f"[对话留档] conversation.enabled = {_conv_recorder.enabled}")
+
     logger.info("[M1] 合同证据链 Orchestrator 模块已初始化")
     return modules
 
@@ -177,8 +198,12 @@ async def run_research(
     modules: dict[str, Any],
     session_id: str = "",
     doc_ids: list[str] | None = None,
+    output_dir: str = "outputs/reports",
 ):
-    """执行合同证据链流程，返回 ResearchReport。"""
+    """执行合同证据链流程，返回 ResearchReport。
+
+    output_dir: 主研究链报告输出目录；对话留档开启时在同目录写 agent_conversations_*.jsonl。
+    """
     import asyncio
 
     logger = logging.getLogger("runner")
@@ -199,7 +224,40 @@ async def run_research(
     )
 
     orchestrator = modules["orchestrator"]
-    report = await orchestrator.run(query, config=run_cfg)
+
+    # 对话留档：开启时在报告同目录写 agent_conversations_<ts>_<query>.jsonl
+    from src.utils.conversation_recorder import recorder as _conv_recorder
+    _conv = _conv_recorder.enabled
+    if _conv:
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in query[:20])
+        # 并发实例（如 ContractNLI 评测 ThreadPoolExecutor）可能同秒同查询，追加序号保证 run_id 唯一，
+        # 避免多个 run 共用同一会话文件 / turn 计数互相覆盖
+        _seq = next(_CONV_RUN_SEQ)
+        _conv_recorder.set_session(
+            run_id=f"{_ts}_{_safe}_{_seq}",
+            path=os.path.join(output_dir, f"agent_conversations_{_ts}_{_safe}.jsonl"),
+        )
+        _conv_recorder.record("run_start", query=query, session_id=session_id,
+                              doc_ids=list(doc_ids or []))
+
+    report = None
+    try:
+        report = await orchestrator.run(query, config=run_cfg)
+    finally:
+        if _conv:
+            final_status = (
+                report.structured.get("final_status")
+                if report is not None and getattr(report, "structured", None) else None
+            )
+            _conv_recorder.record(
+                "run_end",
+                final_status=final_status,
+                num_searches=getattr(report, "num_searches", 0) if report is not None else 0,
+                num_replan=getattr(report, "num_replan", 0) if report is not None else 0,
+            )
+            _conv_recorder.clear_session()
+
     logger.info(
         f"[Orchestrator] 报告生成完成 | 状态={report.structured.get('final_status') if report.structured else '?'} | "
         f"置信度={report.confidence:.2f} | 搜索={report.num_searches} | 增量轮数={report.num_replan}"

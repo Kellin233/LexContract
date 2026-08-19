@@ -29,6 +29,12 @@ model:
   # ---------------------------------------------------------------------------
   backend: "deepseek"          # 默认后端名称
 
+  # 每后端上下文窗口（token，统一口径见 src/utils/tokens.py）。
+  # 作为"丢旧轮次"截断兜底的阈值；Key 为各后端在 backend_mapping 中的名字。
+  context_window_tokens:
+    deepseek: 128000
+    mimo: 32000
+
   # 以下为向后兼容的显式配置（优先级低于 .env）。
   # 推荐做法：在 .env 中配置，此处留空或注释掉。
   # base_model: "Qwen/Qwen2.5-7B-Instruct"
@@ -236,9 +242,29 @@ contract:
   stop_on_no_effective_new_evidence: true
   # 是否启用 CitationVerifier 原文校验（quote == DB full_text[start:end]）
   enable_evidence_verification: true
+  # Refiner 输入预算（token）。超预算只告警/记录，暂不裁剪证据子集
+  refiner_input_token_budget: 65536
+  # Searcher 工具结果去重：同一切片/章节在本 Searcher 多轮内只注入一次完整原文，
+  # 重复项保留 id/偏移/得分 + 短标记。关掉可做 A/B 或回退
+  searcher_dedup_tool_results: true
+  # Searcher 检索预算（可配）：最多多少“发 search 的轮”，每轮最多几个检索词。
+  # 默认 3 轮 × 每轮 1 个 = 最多 3 个检索词/个 Searcher（旧值 3×3=9 太多、太耗时）。
+  # 对照腿 B：1 轮 × 最多 3 个（一轮问满）。
+  # A/B 实测（同一 5 条任务，并发 2）：两腿预测完全一致（Acc 0.80 / F1 0.72），无质量差异；
+  # 1轮×3问 更快（223s vs 308s，-27% 墙钟）但 Searcher token 更多（145.6k vs 100.7k，+45%）。
+  # 即“少轮次快、多检索词费 token”，故保持默认 3轮×1问（省 token）；要加速改两值为 1/3 即可。
+  searcher_max_search_rounds: 3
+  searcher_max_searches_per_round: 1
   # 会话/文档作用域可覆盖：--session / --doc
   # session_id: "S1"
   # doc_ids: []
+
+conversation:
+  # ---------------------------------------------------------------------------
+  # 对话留档（每个 Agent 的 LLM 请求/响应逐字落盘，对话层深度，jsonl）
+  # 开启后主研究链在报告同目录写 agent_conversations_<ts>_<query>.jsonl
+  # ---------------------------------------------------------------------------
+  enabled: false
 
 eval:
   # ---------------------------------------------------------------------------
@@ -251,18 +277,16 @@ eval:
   # 字符级 span 指标的 cutoff（官方 PAKTON 口径，主指标）：同一次检索结果按
   # 排名截断为前 c 个 chunk 后与 gold 区间做字符重叠 P/R/F1；官方为 1/4/16/32/64
   cutoffs: [1, 4, 16, 32, 64]
-  # 每个 benchmark 用真实 LLM Searcher 参与评测的 query 抽样数
-  #   None=全量 query 都跑 agent；0=只跑确定性部分；正整数=按 seed 抽样
-  agent_limit: 20
+  # ContractNLI 实例并发度（每条实例独立 toolkit/agent_pool/orchestrator，
+  # 避免共享 toolkit.set_scope 在并发下互相覆盖文档作用域）
+  nli_concurrency: 2
   # ContractNLI 的抽样数（None=全量）
   contractnli_limit:
-  # ContractNLI 评测方式：indexed=整库入库+检索式（默认，对齐 PAKTON 的 multi-agent 口径）
-  #                      direct=整段前提直喂（等价 PAKTON 的 naive zero-shot baseline）
-  contractnli_mode: "indexed"
-  # ContractNLI 合同索引会话（与 LegalBenchRAG 的 contractnli benchmark 分库隔离）
+  # ContractNLI 评测方式：正式完整链路（每条实例把 hypothesis 当研究问题、作用域锁到该合同，
+  # 跑 Planner→Searcher→Reviewer→Refiner），并给 Refiner 切换评测专用提示词——结论输出为
+  # entailment/contradiction/neutral 三选一 + 最相关证据（supporting_evidence_ids）。
+  # 正式生产链路不注入该提示词，Refiner 保持默认生产提示词。
   nli_session: "nli-contractnli"
-  # ContractNLI 检索式下每条按 hypothesis 检索的条款数
-  contractnli_top_k: 8
   # 抽样种子（可复现）
   seed: 0
   # 评测语料切片（ingest 时）：token 预算。500 = PAKTON chunk_sizes=[500] 对齐；

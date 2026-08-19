@@ -43,6 +43,7 @@ from ..contract.store import EvidenceStore
 from ..contract.planner import Planner
 from ..contract.reviewer import Reviewer
 from ..contract.refiner import Refiner
+from ..utils.tokens import enter_token_ledger, exit_token_ledger
 from ..utils.tracing import trace_chain
 
 SharedMemoryStore = Any  # M4（可选保留，仅落最终报告）
@@ -92,6 +93,8 @@ class Orchestrator:
         self._evidence_store = evidence_store or EvidenceStore()
         self._research_state: ResearchState | None = None
         self._num_searches = 0
+        # 本次运行所有 Agent（Planner/Searcher/Reviewer/Refiner）的 LLM token 账本（run 时开启）
+        self._token_ledger: list[int] = []
 
         self._state_handlers: dict[OrchestratorState, Callable[[], asyncio.Future[OrchestratorState]]] = {
             OrchestratorState.IDLE: self._on_idle,
@@ -122,26 +125,30 @@ class Orchestrator:
         self._research_state = None
         self._num_searches = 0
 
-        while self._current_state not in (OrchestratorState.DONE, OrchestratorState.FAILED):
-            if self._is_global_timeout():
-                if self._current_state in (
-                    OrchestratorState.DISPATCHING,
-                    OrchestratorState.COLLECTING,
-                    OrchestratorState.REVIEWING,
-                    OrchestratorState.INCREMENTAL_PLANNING,
-                ):
-                    print("[Timeout] 全局超时，强制进入 Refiner（使用已有证据）")
-                    self._current_state = OrchestratorState.REFINING
-                else:
-                    self._current_state = OrchestratorState.FAILED
-                break
+        self._token_ledger = enter_token_ledger()
+        try:
+            while self._current_state not in (OrchestratorState.DONE, OrchestratorState.FAILED):
+                if self._is_global_timeout():
+                    if self._current_state in (
+                        OrchestratorState.DISPATCHING,
+                        OrchestratorState.COLLECTING,
+                        OrchestratorState.REVIEWING,
+                        OrchestratorState.INCREMENTAL_PLANNING,
+                    ):
+                        print("[Timeout] 全局超时，强制进入 Refiner（使用已有证据）")
+                        self._current_state = OrchestratorState.REFINING
+                    else:
+                        self._current_state = OrchestratorState.FAILED
+                    break
 
-            handler = self._state_handlers.get(self._current_state)
-            if handler is None:
-                raise RuntimeError(f"Unknown state: {self._current_state}")
-            next_state = await handler()
-            self._current_state = next_state
-            print(f"[Orchestrator] State transition: {self._current_state.value}")
+                handler = self._state_handlers.get(self._current_state)
+                if handler is None:
+                    raise RuntimeError(f"Unknown state: {self._current_state}")
+                next_state = await handler()
+                self._current_state = next_state
+                print(f"[Orchestrator] State transition: {self._current_state.value}")
+        finally:
+            exit_token_ledger()
 
         if self._current_state == OrchestratorState.DONE:
             report = self._runtime.get("final_report")
@@ -397,6 +404,21 @@ class Orchestrator:
             "doc_ids": list(self._config.doc_ids),
             "evidence_store": self._evidence_store,
         }
+
+    # ------------------------------------------------------------------
+    # 评测遥测（只读，不改变状态机行为）
+    # ------------------------------------------------------------------
+    def last_run_token_usage(self) -> int:
+        """本轮 Searcher 的估算 token 总用量（estimate_messages_tokens 口径）。"""
+        return sum(int(getattr(r, "token_usage", 0) or 0) for r in self._results)
+
+    def last_run_total_token_usage(self) -> int:
+        """本轮所有 Agent（Planner + 并行 Searcher + Reviewer + Refiner）的估算 token 总用量。"""
+        return sum(int(t) for t in self._token_ledger)
+
+    def last_run_evidence(self) -> "EvidenceStore":
+        """本轮运行期证据库（评测把最相关证据原文交给标签适配器时取用）。"""
+        return self._evidence_store
 
     def _is_global_timeout(self) -> bool:
         return time.monotonic() - self._start_time > self._config.global_timeout_seconds
