@@ -90,6 +90,10 @@ def check_scope() -> None:
 
         scoped = DocumentToolkit(session_id="S1")
         _assert_raises(lambda: scoped.get_full_text("doc-b"), "cross-session document")
+        _assert_raises(
+            lambda: scoped.get_section("doc-b", ["Section 1"]),
+            "cross-session section",
+        )
         assert scoped.get_full_text("doc-a") == "alpha"
         assert scoped.get_chunk("doc-a:0")["doc_id"] == "doc-a"
         assert scoped.get_section("doc-a", ["Section 1"])["text"] == "alpha"

@@ -79,7 +79,7 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 
 **RAG 设计**
 
-- **数据底座**：PostgreSQL + pgvector（向量检索）+ ParadeDB `pg_search`（BM25 全文检索），连接信息由 `.env` 的 `PG_*` 配置（`document` 与 `retrieval` 模块的默认端口不同，建议显式统一设置）。
+- **数据底座**：PostgreSQL + pgvector（向量检索）；安装 ParadeDB `pg_search` 时启用 BM25，普通 PostgreSQL 自动降级为向量/全文检索。连接信息统一由 `.env`/`.env.local` 的 `PG_*` 配置，两个模块只使用同一个 `PG_PORT`（默认 5432）。
 - **入库**（`src/document/`）：docling 解析 txt / pdf / docx → 结构感知切块（标题为边界优先、超长逐级下切到句子、章节内相邻片带 50 token 重叠、跨章节不重叠，常规入库默认 600 token/片，评测语料入库为 500）→ bge-m3 向量化 → 写入 `documents / chunks` 两表；`full_text` 逐字保留原文，`charspan` 为全文全局字符偏移，保证证据可精确回查。
 - **三种检索模式**（`src/retrieval/postgres.py`）：`vector`（cosine 相似度）/ `bm25`（pg_search `@@@`）/ `hybrid`（加权 RRF 融合，默认权重 0.5 / 0.5、k=60、候选上限 100）。
 - **作用域强制**：`session_id` 必填，无作用域直接拒绝查询；可附加 `doc_ids` 过滤，或在检索时用 `doc_id` 把查询锁定到单篇文档（多文档语料先定位文档再查条款）。
@@ -121,18 +121,18 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 pip install -r requirements.txt
 cp .env.template .env
 # 需要配置的：DEEPSEEK_API_KEY（主流程）、MIMO_API_KEY（可选）
-# PG_*（PostgreSQL）与 EMBED_*（向量模型）不在 .env.template 中，
-# 参考 src/retrieval/.env.example 与 src/document/.env.example 补到 .env；
+# PG_*（PostgreSQL）与 EMBED_*（向量模型）可直接在 .env.template 基础上配置；
+# 两个模块共用同一个 PG_PORT，ParadeDB 映射到其他端口时只改这一处；
 # .env.local 优先级高于 .env 且被 .gitignore 忽略，适合放个人配置
 ```
 
 **数据底座（PostgreSQL）**
 
 ```bash
-# 初始化检索 schema（pg_search 扩展 / session_id / search_tokens / BM25 索引）
+# 初始化检索 schema（session_id / search_tokens；有 pg_search 时启用 BM25 索引）
 python -m src.retrieval.main init-db
 
-# 解析并把合同入库（含全文 + 向量 + BM25 tokens）
+# 解析并把合同入库（含全文 + 向量；有 pg_search 时回填 BM25 tokens）
 python -m src.document.main parse <合同文件或目录>
 
 # 把文档分派到会话（检索强制要求 session 作用域）

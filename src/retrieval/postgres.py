@@ -28,7 +28,7 @@ def _warn_bm25_unavailable(error: Exception) -> None:
             return
         _bm25_warning_emitted = True
     print(
-        f"[warn] pg_search 不可用，BM25 检索已降级，仅使用向量检索: {error}",
+        f"[warn] pg_search 不可用，BM25 检索已降级；混合检索仅使用向量，全文/grep 仍可用: {error}",
         file=sys.stderr,
     )
 

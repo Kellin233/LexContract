@@ -1,7 +1,7 @@
 """LexContract retrieval 模块 CLI。
 
 用法：
-    python3 -m src.retrieval.main init-db                       # 建扩展/加列/建 BM25 索引
+    python3 -m src.retrieval.main init-db                       # 加列；有扩展时建 BM25 索引
     python3 -m src.retrieval.main assign <doc_id> --session S1  # 文档分派到会话
     python3 -m src.retrieval.main unassign <doc_id>             # 取消分派
     python3 -m src.retrieval.main sessions                      # 列出会话
@@ -22,8 +22,11 @@ def cmd_init_db(args) -> int:
     from .store import connect, init_db
 
     with connect() as conn:
-        init_db(conn)
-    print("数据库结构初始化完成（pg_search 扩展 + session_id + search_tokens + BM25 索引）。")
+        bm25_ok = init_db(conn)
+    if bm25_ok is False:
+        print("数据库基础结构初始化完成；未检测到 pg_search，BM25 已降级，仅向量/全文检索可用。")
+    else:
+        print("数据库结构初始化完成（session_id + search_tokens + BM25 索引）。")
     return 0
 
 
@@ -114,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="retrieval", description="LexContract 检索服务（BM25/向量/混合）")
     sub = p.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("init-db", help="初始化 pg_search 扩展、session_id/search_tokens 列与 BM25 索引")
+    sp = sub.add_parser("init-db", help="初始化 session_id/search_tokens 列；有 pg_search 时建立 BM25 索引")
     sp.set_defaults(func=cmd_init_db)
 
     sp = sub.add_parser("assign", help="文档分派到会话")

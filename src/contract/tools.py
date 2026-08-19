@@ -362,6 +362,7 @@ class DocumentToolkit:
 
         保证 quote 属于原始连续文本；无 full_text 时降级为切片文本拼接。
         """
+        self._assert_scope(doc_id)
         chunks = self._section_chunks(doc_id, list(section_path or []))
         if not chunks:
             return None

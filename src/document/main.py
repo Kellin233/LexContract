@@ -49,7 +49,7 @@ def _ensure_retrieval_schema() -> bool:
         result = retrieval_init_db(conn)
         if result is False:
             print(
-                "[warn] 检索 schema 基础字段已就绪，但 pg_search 不可用，BM25 功能降级。",
+                "[warn] 检索基础字段已就绪，但 pg_search 不可用，BM25 功能降级；全文/grep 与向量检索仍可用。",
                 file=sys.stderr,
             )
         return result is not False

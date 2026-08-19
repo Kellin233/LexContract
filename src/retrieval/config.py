@@ -8,9 +8,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# 加载当前模块目录或项目根目录下的 .env
+# 加载当前模块目录或项目根目录下的 .env；.env.local 优先级更高
 load_dotenv(BASE_DIR / ".env")
 load_dotenv(BASE_DIR.parent.parent / ".env")  # src/retrieval -> src -> LexContract 根
+load_dotenv(BASE_DIR / ".env.local", override=True)
+load_dotenv(BASE_DIR.parent.parent / ".env.local", override=True)
 
 # --- PostgreSQL（与 document 模块一致）---
 PG_HOST = os.getenv("PG_HOST", "localhost")

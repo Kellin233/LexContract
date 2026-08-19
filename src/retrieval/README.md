@@ -2,9 +2,9 @@
 
 `src/retrieval/` 是 LexContract 项目的一个独立子模块，基于 `document/` 模块已入库的切片与向量，提供面向合同交叉检索的**检索服务**：
 
-- **BM25（稀疏/关键词）检索**：基于数据库内 **pg_search (ParadeDB)** 扩展，索引 `chunks.search_tokens`（jieba 分词后的空格 token 串）。
+- **BM25（稀疏/关键词）检索**：有 **pg_search (ParadeDB)** 扩展时启用，索引 `chunks.search_tokens`（jieba 分词后的空格 token 串）；扩展缺失时自动降级。
 - **向量（稠密）检索**：基于 **pgvector** 的 `chunks.embedding`（BAAI/bge-m3, 1024 维, HNSW cosine 索引）。
-- **混合检索**：BM25 + 向量候选，按 **加权 Reciprocal Rank Fusion (RRF)** 融合（`weight/(k+rank)`，默认 k=60，权重 0.5/0.5）。
+- **混合检索**：可用时融合 BM25 + 向量候选，按 **加权 Reciprocal Rank Fusion (RRF)** 融合（`weight/(k+rank)`，默认 k=60，权重 0.5/0.5）；BM25 不可用时仅使用向量候选。
 - **重排（可选）**：BGE cross-encoder（`BAAI/bge-reranker-v2-m3`）对候选按 `(query, chunk)` 打分取 top-k。
 - **会话/工作区作用域**：检索严格限定在某个 `session`，拒绝无作用域查询。
 
@@ -29,7 +29,7 @@ src/retrieval/
 
 ## 前置条件
 
-1. **PostgreSQL + pgvector + pg_search**：BM25 依赖 **pg_search (ParadeDB)** 扩展。标准 `pgvector/pgvector` 镜像**不含**该扩展，请使用 ParadeDB 版镜像（内建 pgvector + pg_search），例如本机本地验证用的：
+1. **PostgreSQL + pgvector**：BM25 为可选能力，依赖 **pg_search (ParadeDB)** 扩展。标准 `pgvector/pgvector` 镜像**不含**该扩展；此时文档入库、全文/grep 和向量检索仍可用，BM25 会输出一次警告并自动降级。需要 BM25 时使用 ParadeDB 版镜像（内建 pgvector + pg_search），例如：
    ```bash
    docker run -d --name lexcontract-paradedb \
      -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lexcontract \
@@ -52,7 +52,7 @@ cp src/retrieval/.env.example src/retrieval/.env   # 按需修改
 python3 -m src.document.main init-db
 python3 -m src.document.main parse 合同.pdf
 
-# 1) 初始化检索结构（pg_search 扩展 + session_id / search_tokens 列 + BM25 索引）
+# 1) 初始化检索结构（session_id / search_tokens 列；有 pg_search 时再建 BM25 索引）
 python3 -m src.retrieval.main init-db
 
 # 2) 回填 search_tokens（document 入库未写该列，须先回填）
@@ -70,7 +70,7 @@ python3 -m src.retrieval.main query "甲方逾期付款的违约金如何计算"
 
 | 命令 | 说明 |
 |------|------|
-| `init-db` | 建 pg_search 扩展、加 `session_id`/`search_tokens` 列、建 BM25 索引（幂等） |
+| `init-db` | 加 `session_id`/`search_tokens` 列；有 pg_search 时建 BM25 索引（幂等） |
 | `assign <doc_id> --session <sid>` | 将文档分派到会话（`--session ''` 或省略=取消归属） |
 | `unassign <doc_id>` | 取消文档的会话归属 |
 | `sessions` | 列出各会话的文档数 |
