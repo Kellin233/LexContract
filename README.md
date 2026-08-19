@@ -90,7 +90,7 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 
 - **结构**（`src/contract/schemas.py`）：`Evidence` 携带 `evidence_id / question_id / document_id / section_path / page_no / source_chunk_ids / start_offset / end_offset / quote / verified` 等字段；`quote` 必须是 DB 原文的连续切片。
 - **装配**：Searcher 候选只报 `source_chunk_ids + relevance_note`，`EvidenceAssembler` 按最末级 section 自动聚合完整条款（整章超 `MAX_EVIDENCE_SECTION_TOKENS` 时回退命中切片并集，带零空洞连续性校验），quote 一律从 `documents.full_text[start:end]` 截取，模型无权改写。
-- **校验**：`CitationVerifier` 纯程序化逐字符比对 `quote == full_text[start:end]` 并检查切片覆盖无空洞，失败即丢弃并计入 `drop_reasons`，不依赖 LLM 判断。
+- **校验**：`CitationVerifier` 纯程序化逐字符比对 `quote == full_text[start:end]`，并要求切片并集对证据区间覆盖率 ≥98%、两端落在并集内（±1 字符容差），失败即丢弃并计入 `drop_reasons`，不依赖 LLM 判断。（"零空洞"连续性校验在装配器的整章超限回退路径上。）
 - **去重与注册**：`EvidenceStore` 按 `(document_id, start, end)` 去重，为每条证据分配 `E###` 运行期 ID。
 - **引用**：Refiner 正文只用 `[E###]` 占位，后处理由证据元数据生成 `citations`（《文档》章节 + 页码），杜绝模型自编条款号；`supporting_evidence_ids` 只落最支撑最终结论的证据子集。
 - **缺口**：无法确认的项如实写入 `evidence_gap`；`PARTIALLY_SUFFICIENT` 状态仍生成结论，但结论中明确标注缺口。
@@ -120,7 +120,10 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 ```bash
 pip install -r requirements.txt
 cp .env.template .env
-# 需要配置的：DEEPSEEK_API_KEY（主流程）、MIMO_API_KEY（可选）、PG_*、EMBED_MODEL_NAME
+# 需要配置的：DEEPSEEK_API_KEY（主流程）、MIMO_API_KEY（可选）
+# PG_*（PostgreSQL）与 EMBED_*（向量模型）不在 .env.template 中，
+# 参考 src/retrieval/.env.example 与 src/document/.env.example 补到 .env；
+# .env.local 优先级高于 .env 且被 .gitignore 忽略，适合放个人配置
 ```
 
 **数据底座（PostgreSQL）**
@@ -181,9 +184,9 @@ python tests/contract_smoke.py
 - **ContractNLI**（端到端分类）：每条实例把 hypothesis 当研究问题、作用域锁到该合同，跑一遍正式完整链路（Planner → Searcher → Reviewer → Refiner），评测给 Refiner 切换 3 选 1 标签专用提示词（`entailment / contradiction / neutral`），从 `conclusion` 字段提取分类结果；正式生产链路不注入该提示词。输出 Accuracy / weighted F1 / per-class F1。实例间可并发（默认 2）。
 
 ```bash
-# 语料入库（LegalBenchRAG 会话为空时评测会自动处理）
-python -m src.contract.eval.ingest_raw contractnli        # cuad / maud / privacy_qa
-python -m src.contract.eval.ingest_raw nli                # ContractNLI 合同入库
+# 语料入库（LegalBenchRAG 会话为空时评测会自动处理；ContractNLI 需手动入库或加 --ingest-nli）
+python -m src.contract.eval.ingest_raw contractnli --root <LegalBenchRAG根目录>   # cuad / maud / privacy_qa
+python -m src.contract.eval.ingest_raw nli --contractnli-jsonl <jsonl或zip> --session nli-contractnli
 
 # 跑评测
 python -m src.contract.eval.main --mode legalbenchrag
@@ -191,6 +194,10 @@ python -m src.contract.eval.main --mode legalbenchrag --only privacy_qa
 python -m src.contract.eval.main --mode contractnli --limit 15
 python -m src.contract.eval.main --mode contractnli --limit 15 --nli-concurrency 2 \
   --searcher-max-rounds 1 --searcher-max-searches-per-round 3   # 检索预算 A/B 对照腿
+
+# 小批量冒烟：预生成请求集（configs/eval_sets/smoke_*.json）只跑子集
+python -m src.contract.eval.main --mode legalbenchrag --request-set configs/eval_sets/smoke_legalbenchrag_3.json
+python -m src.contract.eval.main --mode contractnli --request-set configs/eval_sets/smoke_contractnli_5.json
 ```
 
 **评测表现（2026-08 实测）**

@@ -26,6 +26,21 @@
         "contractnli/ceii-and-nda.txt",
         "contractnli/oceaneering-non-disclosure-agreement.txt"
       ]
+    },
+    "cuad": {
+      "count": 0,
+      "queries": [],
+      "doc_ids": []
+    },
+    "maud": {
+      "count": 0,
+      "queries": [],
+      "doc_ids": []
+    },
+    "privacy_qa": {
+      "count": 0,
+      "queries": [],
+      "doc_ids": []
     }
   }
 }
