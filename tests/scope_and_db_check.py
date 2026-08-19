@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.contract.tools import DocumentToolkit
 from src.document import main as document_main
+from src.retrieval.postgres import PostgresRetriever
 import src.retrieval.store as retrieval_store
 
 
@@ -118,8 +119,24 @@ def check_db_boundaries() -> None:
         assert failed_backfill_conn.rollback_called and failed_backfill_conn.closed
 
         source = inspect.getsource(document_main.cmd_parse)
-        assert "with connect() as db_conn" in source
-        assert "db_conn = connect()" not in source
+        assert "db_conn = connect()" in source
+        assert "with connect() as db_conn" not in source
+
+        retriever = PostgresRetriever(embed_query=lambda _query: [0.1, 0.2])
+
+        def fake_execute(sql, _params):
+            if "search_tokens" in sql:
+                raise RuntimeError("pg_search missing")
+            return [
+                (
+                    "doc-a:0", "alpha", "doc-a", "A", "S1", 1,
+                    ["Section 1"], [0, 5], "txt", 0.1,
+                )
+            ]
+
+        retriever._execute = fake_execute
+        rows = retriever.retrieve("alpha", session_id="S1", mode="hybrid", limit=1)
+        assert len(rows) == 1 and rows[0].id == "doc-a:0"
     finally:
         retrieval_store.connect = original_connect
         retrieval_store.init_db = original_init_db

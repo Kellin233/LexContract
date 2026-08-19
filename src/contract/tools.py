@@ -104,7 +104,7 @@ class DocumentToolkit:
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM documents WHERE doc_id = %s AND session_id = %s",
+                "SELECT 1 FROM documents d WHERE d.doc_id = %s AND d.session_id = %s",
                 (doc_id, self.session_id),
             )
             if cur.fetchone() is None:

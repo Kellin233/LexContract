@@ -181,14 +181,20 @@ def cmd_parse(args) -> int:
 
         # 入库
         if db_enabled:
+            db_conn = None
             try:
-                with connect() as db_conn:
-                    upsert_document(db_conn, doc)
+                db_conn = connect()
+                upsert_document(db_conn, doc)
                 print(f"  -> 已写入 PostgreSQL: {doc.doc_id}")
                 if retrieval_ok:
                     _backfill_search_tokens([doc.doc_id])
             except Exception as e:  # noqa: BLE001
+                if db_conn is not None:
+                    db_conn.rollback()
                 print(f"[error] 入库失败 {doc.doc_id}: {e}", file=sys.stderr)
+            finally:
+                if db_conn is not None:
+                    db_conn.close()
     return 0
 
 
