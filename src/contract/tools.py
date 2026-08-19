@@ -77,6 +77,41 @@ class DocumentToolkit:
         self.session_id = (session_id or "").strip()
         self._doc_ids = list(doc_ids) if doc_ids else []
 
+    def _effective_doc_ids(self, doc_ids: list[str] | None = None) -> list[str] | None:
+        """合并调用方文档过滤与运行期白名单，防止调用方绕过 ``_doc_ids``。"""
+        requested = list(doc_ids) if doc_ids else []
+        if self._doc_ids:
+            allowed = set(self._doc_ids)
+            invalid = [doc_id for doc_id in requested if doc_id not in allowed]
+            if invalid:
+                raise ValueError(
+                    f"doc_ids outside the configured scope: {', '.join(invalid)}"
+                )
+            return list(self._doc_ids) if not requested else requested
+        return requested or None
+
+    def _assert_scope(self, doc_id: str) -> None:
+        """确认文档属于当前 session 且满足运行期文档白名单。"""
+        doc_id = (doc_id or "").strip()
+        if not self.session_id:
+            raise ValueError("refusing an unscoped document lookup (session_id is empty)")
+        if not doc_id:
+            raise ValueError("doc_id is required for a scoped document lookup")
+        if self._doc_ids and doc_id not in self._doc_ids:
+            raise ValueError(f"document {doc_id!r} is outside the configured doc_ids scope")
+
+        from src.retrieval.store import connect
+
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM documents WHERE doc_id = %s AND session_id = %s",
+                (doc_id, self.session_id),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(
+                    f"document {doc_id!r} is not available in session {self.session_id!r}"
+                )
+
     # ------------------------------------------------------------------
     # 基础能力
     # ------------------------------------------------------------------
@@ -89,14 +124,14 @@ class DocumentToolkit:
         snippet 取切片头部窗口，长度由后端配置 SNIPPET_CHARS 控制，不对 Agent 暴露。
         """
         limit = max(1, min(top_k, 20))
-        scoped = list(doc_ids) if doc_ids else None
+        scoped = self._effective_doc_ids(doc_ids)
         with self._lock:
             rows = self.retriever.retrieve(
                 query,
                 mode="hybrid",
                 session_id=self.session_id,
                 limit=limit,
-                doc_ids=scoped or (self._doc_ids or None),
+                doc_ids=scoped,
             )
         return [_search_row_to_item(r) for r in rows]
 
@@ -119,6 +154,7 @@ class DocumentToolkit:
         params: list = [self.session_id]
         scope_sql = ""
         if doc_id:
+            self._assert_scope(doc_id)
             scope_sql = " AND c.doc_id = %s"
             params.append(doc_id)
         elif self._doc_ids:
@@ -182,6 +218,10 @@ class DocumentToolkit:
 
     def get_chunk(self, chunk_id: str) -> dict | None:
         """按切片 ID 取切片原文与元数据。"""
+        doc_id, _, chunk_index = str(chunk_id).rpartition(":")
+        if not doc_id or not chunk_index.isdigit():
+            raise ValueError(f"invalid chunk_id: {chunk_id!r}")
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
@@ -189,9 +229,9 @@ class DocumentToolkit:
                 """
                 SELECT c.id, c.text, c.doc_id, d.title, c.section_path, c.page_no, c.charspan, d.source_format
                 FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
-                WHERE c.id = %s
+                WHERE c.id = %s AND d.session_id = %s
                 """,
-                (chunk_id,),
+                (chunk_id, self.session_id),
             )
             row = cur.fetchone()
         if row is None:
@@ -206,21 +246,26 @@ class DocumentToolkit:
     # 条款级能力
     # ------------------------------------------------------------------
     def get_full_text(self, doc_id: str) -> str:
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT full_text FROM documents WHERE doc_id = %s", (doc_id,))
+            cur.execute(
+                "SELECT full_text FROM documents WHERE doc_id = %s AND session_id = %s",
+                (doc_id, self.session_id),
+            )
             row = cur.fetchone()
         return row[0] if row and row[0] else ""
 
     def get_document(self, doc_id: str) -> dict | None:
         """文档基本信息（标题/来源格式）。"""
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT doc_id, title, source_format FROM documents WHERE doc_id = %s",
-                (doc_id,),
+                "SELECT doc_id, title, source_format FROM documents WHERE doc_id = %s AND session_id = %s",
+                (doc_id, self.session_id),
             )
             row = cur.fetchone()
         if row is None:
@@ -234,14 +279,19 @@ class DocumentToolkit:
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
+            doc_filter = ""
+            params: list[Any] = [self.session_id]
+            if self._doc_ids:
+                doc_filter = " AND doc_id = ANY(%s)"
+                params.append(list(self._doc_ids))
             cur.execute(
-                """
+                f"""
                 SELECT doc_id, title, source_format
                 FROM documents
-                WHERE session_id = %s
+                WHERE session_id = %s{doc_filter}
                 ORDER BY doc_id
                 """,
-                (self.session_id,),
+                params,
             )
             return [
                 {"doc_id": r[0], "title": r[1] or "", "source_format": r[2] or ""}
@@ -250,33 +300,38 @@ class DocumentToolkit:
 
     def get_page_for_span(self, doc_id: str, start: int, end: int) -> int:
         """返回覆盖 [start, end] 区间切片的起始页码（找不到则 0）。"""
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT page_no FROM chunks
-                WHERE doc_id = %s AND charspan[1] <= %s AND charspan[2] >= %s
+                SELECT c.page_no FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.doc_id = %s AND d.session_id = %s
+                  AND c.charspan[1] <= %s AND c.charspan[2] >= %s
                 ORDER BY charspan[1] LIMIT 1
                 """,
-                (doc_id, start, end),
+                (doc_id, self.session_id, start, end),
             )
             row = cur.fetchone()
         return row[0] if row and row[0] else 0
 
     def _section_chunks(self, doc_id: str, section_path: list[str]) -> list[dict]:
         """取某章节下所有切片（精确匹配；无则前缀匹配），按起始偏移排序。"""
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
             # 精确匹配
             cur.execute(
                 """
-                SELECT id, text, section_path, page_no, charspan
-                FROM chunks WHERE doc_id = %s AND section_path = %s
-                ORDER BY (charspan[1] IS NOT NULL) DESC, charspan[1], id
+                SELECT c.id, c.text, c.section_path, c.page_no, c.charspan
+                FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.doc_id = %s AND d.session_id = %s AND c.section_path = %s
+                ORDER BY (c.charspan[1] IS NOT NULL) DESC, c.charspan[1], c.id
                 """,
-                (doc_id, list(section_path)),
+                (doc_id, self.session_id, list(section_path)),
             )
             rows = cur.fetchall()
             if not rows and section_path:
@@ -284,11 +339,13 @@ class DocumentToolkit:
                 prefix = list(section_path)
                 cur.execute(
                     """
-                    SELECT id, text, section_path, page_no, charspan
-                    FROM chunks WHERE doc_id = %s AND section_path[1:%s] = %s
-                    ORDER BY (charspan[1] IS NOT NULL) DESC, charspan[1], id
+                    SELECT c.id, c.text, c.section_path, c.page_no, c.charspan
+                    FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
+                    WHERE c.doc_id = %s AND d.session_id = %s
+                      AND c.section_path[1:%s] = %s
+                    ORDER BY (c.charspan[1] IS NOT NULL) DESC, c.charspan[1], c.id
                     """,
-                    (doc_id, len(prefix), prefix),
+                    (doc_id, self.session_id, len(prefix), prefix),
                 )
                 rows = cur.fetchall()
         return [
@@ -330,20 +387,22 @@ class DocumentToolkit:
 
     def get_document_outline(self, doc_id: str) -> list[dict]:
         """文档目录：各章节路径 + 起始/结束偏移（按阅读顺序）。"""
+        self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
         with connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT section_path,
-                       MIN(charspan[1]) AS start_char,
-                       MAX(charspan[2]) AS end_char
-                FROM chunks
-                WHERE doc_id = %s AND array_length(section_path, 1) > 0
-                GROUP BY section_path
+                SELECT c.section_path,
+                       MIN(c.charspan[1]) AS start_char,
+                       MAX(c.charspan[2]) AS end_char
+                FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.doc_id = %s AND d.session_id = %s
+                  AND array_length(c.section_path, 1) > 0
+                GROUP BY c.section_path
                 ORDER BY start_char NULLS LAST
                 """,
-                (doc_id,),
+                (doc_id, self.session_id),
             )
             rows = cur.fetchall()
         return [

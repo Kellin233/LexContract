@@ -1,9 +1,4 @@
-"""Agents 子包：各类 Worker Agent 实现。"""
+"""Agents 子包：当前仅保留合同 Searcher 使用的基础 Agent 协议。"""
 from __future__ import annotations
-
-# 为避免循环导入，请直接从子模块导入：
-#   from agents.base_agent import BaseAgent
-#   from agents.researcher import ResearcherAgent
-#   from agents.summarizer import SummarizerAgent
 
 __all__ = []

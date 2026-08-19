@@ -128,29 +128,15 @@ class AgentPool:
 
     def _create_agent(self, type_key: str) -> "BaseAgent":
         """根据类型键创建对应的 Agent 实例。"""
-        policy = self.policy_factory()
-        tools = self.tools_factory() if self.tools_factory else []
         from .schemas import TaskType
 
         # 合同证据链：由外部提供的 worker_factory 构建（绑定共享 toolkit/证据库）
         if type_key == TaskType.EVIDENCE.value and self.worker_factory is not None:
             return self.worker_factory()
 
-        # 延迟导入避免循环依赖
-        from ..agents.researcher import ResearcherAgent
-        from ..agents.summarizer import SummarizerAgent
-
-        if type_key == TaskType.SEARCH.value:
-            return ResearcherAgent(name=f"researcher_{type_key}", policy=policy, tools=tools)
-        elif type_key == TaskType.ANALYZE.value:
-            return ResearcherAgent(name=f"analyzer_{type_key}", policy=policy, tools=tools)
-        elif type_key == TaskType.VERIFY.value:
-            return ResearcherAgent(name=f"verifier_{type_key}", policy=policy, tools=tools)
-        elif type_key == "synthesize":
-            return SummarizerAgent(name="summarizer", policy=policy, tools=tools)
-        else:
-            # 默认降级为 Researcher
-            return ResearcherAgent(name=f"researcher_default", policy=policy, tools=tools)
+        raise ValueError(
+            f"Unsupported task type '{type_key}': the contract pipeline only creates EVIDENCE workers"
+        )
 
     def _infer_type_key(self, agent: "BaseAgent") -> str:
         """从 Agent 实例推断其类型键。"""
@@ -160,6 +146,6 @@ class AgentPool:
             return "evidence"
         if "Summarizer" in cls_name:
             return "synthesize"
-        # ResearcherAgent 用于 search/analyze/verify，统一归到 search
+        # 非 Searcher Agent 统一归到 search（当前合同链路不会走此分支）
         from .schemas import TaskType
         return TaskType.SEARCH.value

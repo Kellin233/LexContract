@@ -14,7 +14,7 @@ load_dotenv(BASE_DIR.parent.parent / ".env")  # src/retrieval -> src -> LexContr
 
 # --- PostgreSQL（与 document 模块一致）---
 PG_HOST = os.getenv("PG_HOST", "localhost")
-PG_PORT = int(os.getenv("PG_PORT", "5433"))
+PG_PORT = int(os.getenv("PG_PORT", "5432"))
 PG_DB = os.getenv("PG_DB", "lexcontract")
 PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")

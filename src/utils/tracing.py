@@ -89,8 +89,8 @@ def traceable(
         metadata: 附加元数据字典。
 
     用法示例：
-        @traceable(run_type="agent", tags=["m5", "red"])
-        async def attack(self, report): ...
+        @traceable(run_type="agent", tags=["contract", "evidence"])
+        async def collect_evidence(self, question): ...
     """
     def decorator(func: Callable) -> Callable:
         # 如果追踪未开启，直接返回原函数（零开销）
@@ -127,9 +127,8 @@ def trace_block(
     """上下文管理器：手动包裹一段代码块。
 
     用法示例：
-        with trace_block("adversarial_loop", run_type="chain", inputs={"query": q}) as run:
-            report = await loop.run(report)
-            run.add_output({"score": report.final_score})
+        with trace_block("custom_stage", run_type="chain", inputs={"query": q}) as run:
+            run.add_output({"status": "completed"})
     """
     if not is_tracing_enabled():
         # 返回一个 dummy context manager

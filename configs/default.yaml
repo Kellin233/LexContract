@@ -53,7 +53,7 @@ model:
   # ---------------------------------------------------------------------------
   # 设计原则：
   #   - 生成结构化输出（JSON / DAG）→ temperature 低（0.1-0.3）
-  #   - 评分 / 攻击 / 修复 → temperature 极低（0.1），确保一致性
+  #   - 评分 → temperature 极低（0.1），确保一致性
   #   - 研究 / 合成 → temperature 中等（0.5-0.7），保留一定创造性
   #   - 摘要 / 压缩 → temperature 低（0.1），不需要创造性
   #
@@ -86,12 +86,6 @@ model:
       summarizer:
         temperature: 0.5       # 合成报告：流畅但不发散
         max_tokens: 16384      # 报告可能很长，给足 token 预算
-      red_agent:
-        temperature: 0.1       # 攻击必须严谨，几乎不需要随机性
-        max_tokens: 4096
-      blue_agent:
-        temperature: 0.3       # 修复需要确定性
-        max_tokens: 4096
       judge:
         temperature: 0.1       # 评分标准必须一致，避免漂移
         max_tokens: 2048
@@ -108,8 +102,6 @@ model:
     planner: "deepseek"       # 规划器：DeepSeek Flash
     summarizer: "deepseek"    # 合成器：DeepSeek Flash
     judge: "mimo"            # 评分器：Xiaomi MiMo 2.5 Pro
-    red_agent: "mimo"         # 对抗攻击：Xiaomi MiMo 2.5 Pro（OpenAI 兼容）
-    blue_agent: "mimo"        # 对抗修复：Xiaomi MiMo 2.5 Pro
     compressor: "mimo"        # 上下文压缩：MiMo（摘要任务成本低）
 
 orchestrator:
@@ -165,20 +157,6 @@ memory:
   evict_interval: 100
   # 是否启用向量化索引（加速相似度检索）
   enable_vector_index: true
-
-adversarial:
-  # M5: Red-Blue Adversarial Loop 配置
-  # 总开关：是否启用对抗降噪流程
-  enabled: true
-  # Red-Blue 对抗最大轮数
-  max_rounds: 10
-  # Blue Agent 输出质量分阈值，达到此分即可提前终止对抗
-  score_threshold: 9.5
-  # 相邻两轮评分差异阈值，低于此值视为收敛，提前终止
-  delta_threshold: 0.2
-  # 是否保存每轮对抗日志
-  # 注意：采样参数已移至 model.backend_sampling.modules，此处不再使用
-  save_logs: true
 
 evolution:
   # M6: Self-Evolution Engine 配置

@@ -35,7 +35,7 @@ src/retrieval/
      -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lexcontract \
      -p 5434:5432 paradedb/paradedb:0.25.2-pg16
    ```
-   然后在 `.env` 把 `PG_PORT` 指向对应端口（与 document 模块共用同一数据库）。注意：直接从普通镜像拷贝 pg_search 的 `.so` 常因 glibc 版本不匹配而失败，建议直接用 ParadeDB 镜像。
+   然后在 `.env` 把统一的 `PG_PORT` 设置为 `5434`（与 document 模块共用同一数据库）。普通 PostgreSQL 没有 `pg_search` 时仍可使用全文和向量检索，但 BM25 会降级不可用。注意：直接从普通镜像拷贝 pg_search 的 `.so` 常因 glibc 版本不匹配而失败，建议直接用 ParadeDB 镜像。
 2. **模型下载**：查询向量化复用 document 的 `BAAI/bge-m3`；重排用 `BAAI/bge-reranker-v2-m3`（首次运行下载）。直连不可达时设置 `HF_ENDPOINT=https://hf-mirror.com` 下载；下载完成后可用 `TRANSFORMERS_OFFLINE=1 HF_HUB_OFFLINE=1` 离线加载。
 
 ## 安装与配置

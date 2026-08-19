@@ -109,7 +109,7 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 | `src/contract/eval/` | 评测子系统（LegalBenchRAG / ContractNLI，见"评测"） |
 | `src/utils/` | `.env` 加载、token 口径、对话留档、LangSmith 追踪 |
 
-> 主链路只依赖上表中的模块；仓库内未列入的 `src` 子目录（如 `adversarial / evolution / compressor / tools / agents`）不参与当前证据链流程，读代码时可忽略。`src/memory/` 仅用于把最终报告写入 SQLite 存档，不参与检索。
+> 主链路只依赖上表中的模块。当前合同流程不包含对抗审查阶段；旧 deep-research 的 `adversarial / evolution / compressor / tools`、通用 Researcher / Summarizer、旧 Planner / Judge / 消融模块均已移除；`src/agents/` 仅保留合同 Searcher 依赖的基础 Agent 协议。`src/memory/` 仅用于把最终报告写入 SQLite 存档，不参与检索。
 
 ---
 

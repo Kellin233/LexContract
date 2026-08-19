@@ -12,7 +12,7 @@ LexContract — 合同证据链编排器（改造自 deep-research M1 Orchestrat
             └─ 否则（达上限 / 无有效新增）→ REFINING（状态记为 PARTIALLY_SUFFICIENT）
        → DONE / FAILED
 
-原 deep-research 的 SYNTHESIZING / ADVERSARIAL / REPLANNING 状态不在合同流中使用。
+旧 deep-research 的 SYNTHESIZING / REPLANNING 状态不在合同流中使用。
 """
 from __future__ import annotations
 

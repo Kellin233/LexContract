@@ -49,9 +49,9 @@ pip install -r requirements.txt
    ```bash
    docker run -d --name lexcontract-pg \
      -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lexcontract \
-     -p 5433:5432 pgvector/pgvector:pg16
+     -p 5432:5432 pgvector/pgvector:pg16
    ```
-   然后在 `.env` 里把 `PG_PORT` 指向该端口。
+   如使用其他宿主机端口，必须在项目 `.env` 中显式设置统一的 `PG_PORT`。
 2. **模型下载**：embedding 默认模型 `BAAI/bge-m3` 首次运行会从 HuggingFace 下载（约 2GB）；PDF 布局/表格模型同理。若 HuggingFace 直连不可达，设置镜像端点：
    ```bash
    export HF_ENDPOINT=https://hf-mirror.com

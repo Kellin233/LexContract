@@ -37,31 +37,45 @@ def cmd_init_db(args) -> int:
     return 0
 
 
-def _ensure_retrieval_schema(conn) -> bool:
+def _ensure_retrieval_schema() -> bool:
     """尽力应用检索模块所需的 schema（session_id / search_tokens / pg_search 索引）。
 
     依赖 ParadeDB 的 pg_search 扩展；普通 PostgreSQL 上会失败，此时仅保留向量检索可用。
     """
+    from src.retrieval.store import connect, init_db as retrieval_init_db
+    conn = None
     try:
-        from src.retrieval.store import init_db as retrieval_init_db
+        conn = connect()
         retrieval_init_db(conn)
         return True
     except Exception as e:  # noqa: BLE001
+        if conn is not None:
+            conn.rollback()
         print(f"[warn] 检索 schema 未就绪（需 ParadeDB 的 pg_search 扩展），跳过 BM25 相关回填: {e}", file=sys.stderr)
         return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
-def _backfill_search_tokens(conn, doc_ids: list[str] | None) -> int:
+def _backfill_search_tokens(doc_ids: list[str] | None) -> int:
     """为切片回填 BM25 search_tokens（幂等，仅处理缺失行）。返回回填数。"""
+    from src.retrieval.store import backfill_search_tokens, connect
+    conn = None
     try:
-        from src.retrieval.store import backfill_search_tokens
+        conn = connect()
         n = backfill_search_tokens(conn, doc_ids)
         if n:
             print(f"  -> 已回填 BM25 search_tokens: {n} 个切片")
         return n
     except Exception as e:  # noqa: BLE001
+        if conn is not None:
+            conn.rollback()
         print(f"[warn] search_tokens 回填失败（跳过，仅向量检索可用）: {e}", file=sys.stderr)
         return 0
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _backfill_full_text_from_json(conn) -> int:
@@ -99,33 +113,33 @@ def cmd_migrate(_args) -> int:
     """把既有库迁移到证据链阶段：加 full_text 列、恢复全文、回填 BM25 tokens。"""
     from .postgres_store import connect, init_db
 
-    with connect() as conn:
-        try:
+    try:
+        with connect() as conn:
             init_db(conn)  # 幂等：建表 + full_text 列
-        except Exception as e:  # noqa: BLE001
-            print(f"[error] 初始化 document schema 失败: {e}", file=sys.stderr)
-            return 1
-        retrieval_ok = _ensure_retrieval_schema(conn)
+    except Exception as e:  # noqa: BLE001
+        print(f"[error] 初始化 document schema 失败: {e}", file=sys.stderr)
+        return 1
+
+    retrieval_ok = _ensure_retrieval_schema()
+    with connect() as conn:
         restored = _backfill_full_text_from_json(conn)
     print(f"数据库迁移完成：full_text 恢复 {restored} 篇。")
 
-    with connect() as conn:
-        if retrieval_ok:
-            n = _backfill_search_tokens(conn, None)
-            print(f"search_tokens 回填完成：{n} 个切片。")
-        else:
-            print("[warn] 检索扩展未就绪，search_tokens 回填跳过。")
+    if retrieval_ok:
+        n = _backfill_search_tokens(None)
+        print(f"search_tokens 回填完成：{n} 个切片。")
+    else:
+        print("[warn] 检索扩展未就绪，search_tokens 回填跳过。")
     return 0
 
 
 def cmd_parse(args) -> int:
     from .embedder import embed_texts
 
-    if not args.no_db:
+    db_enabled = not args.no_db
+    retrieval_ok = _ensure_retrieval_schema() if db_enabled else False
+    if db_enabled:
         from .postgres_store import connect, upsert_document
-        db_conn = connect()
-    else:
-        db_conn = None
 
     files = list(_iter_input_files(Path(args.input)))
     if not files:
@@ -161,18 +175,15 @@ def cmd_parse(args) -> int:
         print(f"  -> JSON: {out}（{len(doc.chunks)} 个切片）")
 
         # 入库
-        if db_conn is not None:
+        if db_enabled:
             try:
-                upsert_document(db_conn, doc)
+                with connect() as db_conn:
+                    upsert_document(db_conn, doc)
                 print(f"  -> 已写入 PostgreSQL: {doc.doc_id}")
-                # 确保 BM25 依赖的 search_tokens 列存在并回填（幂等、尽力而为）
-                _ensure_retrieval_schema(db_conn)
-                _backfill_search_tokens(db_conn, [doc.doc_id])
+                if retrieval_ok:
+                    _backfill_search_tokens([doc.doc_id])
             except Exception as e:  # noqa: BLE001
                 print(f"[error] 入库失败 {doc.doc_id}: {e}", file=sys.stderr)
-
-    if db_conn is not None:
-        db_conn.close()
     return 0
 
 

@@ -29,19 +29,17 @@ __all__ = [
 class OrchestratorState(Enum):
     """M1 编排层状态机。
 
-    deep-research 流: IDLE → PLANNING → DISPATCHING → COLLECTING → SYNTHESIZING → ADVERSARIAL → DONE
     合同证据链流:   IDLE → PLANNING → DISPATCHING → COLLECTING → REVIEWING
                       → (SUFFICIENT) REFINING
                       → (NEED_MORE) INCREMENTAL_PLANNING → DISPATCHING
                       → (超限/无有效新增) REFINING(PARTIALLY_SUFFICIENT)
-    REPLANNING / ADVERSARIAL 为原 deep-research 流程保留，合同流不再使用。
+    REPLANNING 为旧流程保留，合同流不再使用。
     """
     IDLE = "idle"
     PLANNING = "planning"
     DISPATCHING = "dispatching"
     COLLECTING = "collecting"
     SYNTHESIZING = "synthesizing"
-    ADVERSARIAL = "adversarial"
     REPLANNING = "replanning"
     REVIEWING = "reviewing"
     INCREMENTAL_PLANNING = "incremental_planning"
@@ -126,7 +124,6 @@ class ResearchReport:
         confidence: 整体置信度。
         num_searches: 实际执行的搜索/分析轮数。
         num_replan: 重规划次数。
-        adversarial_rounds: 对抗验证轮数。
         final_score: 最终综合评分（由外部评测模块写入）。
         structured: 合同证据链流程的结构化结果（RefinerResult 的 JSON 字典）。
     """
@@ -136,7 +133,6 @@ class ResearchReport:
     confidence: float = 0.0
     num_searches: int = 0
     num_replan: int = 0
-    adversarial_rounds: int = 0
     final_score: float = 0.0
     structured: dict = field(default_factory=dict)
 
@@ -150,7 +146,6 @@ class RunConfig:
         global_timeout_seconds: 全局硬超时（秒）。
         max_replan_rounds: 最大重规划轮数（deep-research 流）。
         max_sub_questions: 单次规划最多子问题数。
-        enable_adversarial: 是否启用对抗验证。
         enable_evolution: 是否启用自我进化（预留 M6 接口）。
         session_id: 合同证据链流的检索会话作用域。
         doc_ids: 合同证据链流限定检索的文档；空=全部。
@@ -162,7 +157,6 @@ class RunConfig:
     global_timeout_seconds: int = 600
     max_replan_rounds: int = 3
     max_sub_questions: int = 8
-    enable_adversarial: bool = True
     enable_evolution: bool = False
     session_id: str = ""
     doc_ids: list[str] = field(default_factory=list)
