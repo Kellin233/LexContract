@@ -2,7 +2,7 @@
 
 边界（见方案）：只找证据，不输出任何结论。
 - 可多次检索（同义扩展：终止/解除/单方解除/退出…）
-- 通过 get_context/get_section/get_referenced_section 把碎片恢复成完整条款
+- 通过 get_section/get_chunk 把命中恢复成完整条款
 - 最终输出结构化候选，交给 EvidenceAssembler + CitationVerifier 物化与校验
 """
 from __future__ import annotations
@@ -33,12 +33,9 @@ MAX_TURNS = 5
 MAX_SEARCH_ROUNDS = 3
 MAX_SEARCHES_PER_ROUND = 1
 
-# 检索类工具：共享同一检索预算（总轮数 + 每轮检索调用数）。"search" 是拆分为三工具前的旧名，保留兼容。
+# 检索类工具：共享同一检索预算（总轮数 + 每轮检索调用数）。search/grep 之外的读取类工具不占预算。
 _RETRIEVAL_TOOLS = frozenset({
     "search",
-    "search_vector",
-    "search_bm25",
-    "search_hybrid",
     "grep",
 })
 
@@ -52,27 +49,29 @@ def build_system_prompt(max_rounds: int, max_searches_per_round: int) -> str:
     return f"""\
 You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to locate and capture the ORIGINAL clauses of the contract documents relevant to the research question.
 
+AVAILABLE TOOLS:
+- list_documents: lists the documents in the current session (doc_id/title/source format), no full text.
+- search(query, top_k, doc_ids): hybrid semantic search (vector + BM25 + rerank); returns short snippets with metadata and score. Use FIRST to locate clauses by MEANING or synonyms.
+- grep(pattern, mode, top_k, case_sensitive, doc_id): exact literal or regex match over the original clause text; returns snippets. Use to CONFIRM exact wording or pin a precise article number.
+- get_document_outline(doc_id): section paths + offsets, for navigating clauses by heading.
+- get_section(doc_id, section_path): the COMPLETE continuous original text of a section, with offsets and chunk ids.
+- get_chunk(chunk_id): the full original text of a single chunk.
+
 CRITICAL RULES:
 1. NEVER interpret, judge, summarize, or reach conclusions about the contract. Only collect original text.
-2. Use the retrieval tools to find clauses. IMPORTANT: a clause may be named in the question by a CANONICAL LABEL or standard term that does NOT appear verbatim in the contract (e.g. the "Regulatory Approvals" clause may be titled "Reasonable Best Efforts; Filings", the "Specific Performance" clause may be titled "Enforcement"). To locate a clause by its name, ALWAYS PREFER SEMANTIC search (search_hybrid / search_vector) using the issue's MEANING or synonyms (e.g. regulatory approvals / filings / consents / authorizations; specific performance / enforcement / equitable relief / irreparable harm); use grep (literal or regex) mainly to CONFIRM exact wording or to pin a precise article number. Try synonyms if nothing useful (e.g. termination / rescission / unilateral termination / early termination).
-3. When you have identified the target document, lock later search_*/grep calls to it by passing `doc_id=...` — otherwise hits mix passages from ALL documents in the corpus. CRITICAL: corpus doc_ids are long, opaque strings (e.g. "maud:VEREIT_Realty_Income_Corporation.pdf||VEREIT_Realty_Income_Corporation Amendment No.1.txt"); NEVER guess or reconstruct a doc_id from a title. Only pass a doc_id you have SEEN verbatim in a previous tool result. If a doc_id-locked search returns [], the id was wrong — re-search WITHOUT `doc_id` using a party-name query (e.g. "VEREIT Realty Income specific performance") to surface the correct document.
-4. Once a relevant clause is located, call `get_document_outline` / `get_section` to capture the COMPLETE original clause text (by section_path or by section offsets); use `get_context` to expand a truncated fragment around a hit. The evidence you return must be full clauses, never fragments.
-5. Follow internal cross-references: if a clause says "except as provided in Article X" / "subject to Section X", call `get_referenced_section` to also capture that section.
+2. A clause may be named in the question by a CANONICAL LABEL or standard term that does NOT appear verbatim in the contract (e.g. the "Regulatory Approvals" clause may be titled "Reasonable Best Efforts; Filings", the "Specific Performance" clause may be titled "Enforcement"). To locate a clause by its name, ALWAYS PREFER `search` with the issue's MEANING or synonyms (e.g. regulatory approvals / filings / consents / authorizations; specific performance / enforcement / equitable relief / irreparable harm); use `grep` (literal or regex) mainly to CONFIRM exact wording or to pin a precise article number. Try synonyms if nothing useful (e.g. termination / rescission / unilateral termination / early termination).
+3. search/grep return only short snippets. They LOCATE evidence — they are NOT the evidence. To identify which chunks form a clause, call `get_section` (using the section_path shown in the hit) or `get_chunk` (using the chunk id); the system will aggregate the full clause automatically from the chunk ids you report.
+4. When you have identified the target document(s), lock later search/grep calls by passing doc_ids / doc_id — otherwise hits mix passages from ALL documents in the corpus. CRITICAL: corpus doc_ids are long, opaque strings (e.g. "maud:VEREIT_Realty_Income_Corporation.pdf||VEREIT_Realty_Income_Corporation Amendment No.1.txt"); NEVER guess or reconstruct a doc_id from a title. Only pass a doc_id you have SEEN verbatim in a previous tool result. If a doc_id-locked search returns [], the id was wrong — re-search WITHOUT doc_ids using a party-name query (e.g. "VEREIT Realty Income specific performance") to surface the correct document.
+5. Follow internal cross-references: if a clause says "except as provided in Article X" / "subject to Section X", use `grep` (e.g. pattern="Section X") to locate the referenced provision, then `get_section` to capture it.
 6. Collect ALL clauses that bear on the research question — do not stop at the first hit.
-7. You have a HARD BUDGET on retrieval calls (search_hybrid / search_vector / search_bm25 / grep ALL count): {rounds_txt}, with {per_round} per such round. Choose queries wisely (cover the key synonyms early; prefer semantic search for clause names); expansion via get_context/get_section and the final JSON reply do not count against the budget.
-8. For each captured clause, report the precise offsets, doc_id and source chunk ids EXACTLY as shown by `get_section` / search / grep results. Never invent or guess a chunk id (e.g. ":0"), a doc_id, or an offset: copy them verbatim from a tool result. An item that exists only in the document outline is NOT evidence until you have retrieved its full text with `get_section` (or expanded it with `get_context`) — do not report outline-only sections as captured clauses.
+7. You have a HARD BUDGET on retrieval calls (search / grep BOTH count): {rounds_txt}, with {per_round} per such round. Choose queries wisely (cover the key synonyms early; prefer semantic search for clause names); expansion via get_section/get_chunk/get_document_outline/list_documents and the final JSON reply do not count against the budget.
+8. For each relevant clause, report the chunk ids that hit it, copied VERBATIM from tool results; if a clause spans multiple chunks, report all chunks it involves. The system will automatically complete the full clause at the finest section level — do NOT fill in any offsets, section paths, page numbers, or scores.
 
 FINAL OUTPUT FORMAT (must be the last assistant message, JSON only — an array, may be empty):
 [
   {{
-    "doc_id": "...",
-    "start_offset": 0,
-    "end_offset": 0,
-    "section_path": ["Article 12"],
-    "source_chunk_ids": ["doc-xxx:3"],
-    "page_no": 1,
-    "relevance_note": "one sentence on why this clause is relevant to the question (not used as a citation)",
-    "retrieval_score": 0.8
+    "source_chunk_ids": ["doc-xxx:3", "doc-xxx:4"],
+    "relevance_note": "one sentence on why this clause is relevant to the question (not used as a citation)"
   }}
 ]
 
@@ -193,8 +192,8 @@ class Searcher(BaseAgent):
                 messages.append({
                     "role": "user",
                     "content": (
-                        "You must call a retrieval tool now (search_vector / search_bm25 / search_hybrid / "
-                        "grep / get_context / get_section / get_referenced_section) to gather evidence. "
+                        "You must call a retrieval tool now (search / grep / get_section / get_chunk / "
+                        "get_document_outline / list_documents) to gather evidence. "
                         "Do not stop without evidence or without a valid JSON array."
                     ),
                 })
@@ -245,11 +244,11 @@ class Searcher(BaseAgent):
                     except json.JSONDecodeError:
                         args = {}
                     if tool_name in _RETRIEVAL_TOOLS:
-                        # 检索轮数（发检索调用的轮）已用满：不再执行 search_*/grep（允许 get_section 等继续）
+                        # 检索轮数（发检索调用的轮）已用满：不再执行 search/grep（允许 get_section 等继续）
                         if search_rounds_used >= self.max_search_rounds:
                             _q = str(args.get("pattern") or args.get("query", ""))[:50]
                             note = {"error": f"Search-round budget exhausted ({self.max_search_rounds} rounds); this search was skipped "
-                                             f"(you may still use get_section/get_context to expand existing hits): {_q}"}
+                                             f"(you may still use get_section/get_chunk to expand existing hits): {_q}"}
                             trajectory.append({"turn": turn, "role": "tool",
                                                "tool_call_id": tc.get("id", ""), "name": tool_name,
                                                "result": note})
@@ -337,17 +336,15 @@ class Searcher(BaseAgent):
     def _dedup_tool_result(self, tool_name: str, result: Any) -> Any:
         """去掉本 Searcher 已注入过的完整原文（保留身份/偏移/得分骨架）。
 
-        按工具返回形态分派；只替换 text 为短标记，quote 由 EvidenceAssembler
-        从 DB 按偏移物化，与 tool message 的 text 无关，故不影响证据正确性。
+        search/grep 只返回短 snippet，不参与全文去重；get_chunk 按切片去重，
+        get_section 按章节去重。quote 由 EvidenceAssembler 从 DB 按偏移物化，
+        与 tool message 的 text 无关，故不影响证据正确性。
         """
         if not self.dedup_tool_results:
             return result
-        if tool_name in ("search", "search_vector", "search_bm25", "search_hybrid",
-                         "grep", "get_context") and isinstance(result, list):
-            return [self._dedup_chunk_item(item) for item in result]
         if tool_name == "get_chunk":
             return self._dedup_chunk_item(result)
-        if tool_name in ("get_section", "get_referenced_section"):
+        if tool_name == "get_section":
             return self._dedup_section_item(result)
         return result
 

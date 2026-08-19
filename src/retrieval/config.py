@@ -27,6 +27,10 @@ EMBED_DEVICE = os.getenv("EMBED_DEVICE", "cpu")
 # --- 检索默认参数 ---
 CANDIDATE_K = int(os.getenv("CANDIDATE_K", "100"))
 TOP_K = int(os.getenv("TOP_K", "10"))
+# search/grep 返回给 Agent 的片段长度（字符数），仅后端可配，不对 Agent 暴露参数
+SNIPPET_CHARS = int(os.getenv("SNIPPET_CHARS", "200"))
+# 证据物化：整章（最末级 section）文本超过该 token 数时回退为命中切片并集
+MAX_EVIDENCE_SECTION_TOKENS = int(os.getenv("MAX_EVIDENCE_SECTION_TOKENS", "3000"))
 
 # 加权 Reciprocal Rank Fusion
 RRF_K = int(os.getenv("RRF_K", "60"))

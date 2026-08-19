@@ -1,9 +1,11 @@
 """Hermetic 验证：Searcher 工具结果去重（不依赖 DB / LLM / embedding 模型）。
 
-伪 toolkit 返回重叠切片 / 章节，伪 policy 按脚本返回 tool_calls，验证：
-1. 重复切片（search 同义词重叠、get_context 带回底片）正文被替换为短标记；
-2. 同章节被第二次引用（get_referenced_section 解析回同一章节）时正文去重；
-3. 去重开 vs 关：dedup 计数正确、total_tokens 更小、首见正文仍然完整。
+6 工具收敛后：search/grep 只返回 snippet、不参与全文去重；完整原文只由
+get_chunk / get_section 承载并按切片/章节去重。验证：
+1. search 同义词重叠时 snippet 不做全文 stub；
+2. get_chunk 同一切片第二次返回时正文被替换为短标记；
+3. get_section 同章节第二次引用时正文被替换为短标记；
+4. 去重开 vs 关：dedup 计数正确、total_tokens 更小、首见正文仍然完整。
 
 用法: python tests/tool_result_dedup_check.py
 """
@@ -23,6 +25,7 @@ from src.contract.tools import DocumentTool
 from src.contract.worker import Searcher
 from src.orchestrator.schemas import SubTask, TaskType
 
+
 def _chunk_stub(cid: str) -> str:
     return f"[already shown earlier — chunk {cid}; full text omitted]"
 
@@ -32,11 +35,26 @@ def _section_stub(label: str) -> str:
 
 
 def _full(cid: str) -> str:
-    # 正文刻意做得足够长（模拟真实几百 token 的切片），短标记必须显著更省
     return (f"TEXT_{cid} " * 25).strip()
 
 
-def _chunk(cid: str) -> dict:
+def _chunk_snippet(cid: str) -> dict:
+    return {
+        "id": cid,
+        "snippet": f"SNIP_{cid}",
+        "doc_id": cid.split(":")[0],
+        "doc_title": "doc1",
+        "session_id": "S1",
+        "section_path": ["Art 1"],
+        "page_no": 1,
+        "charspan": [0, 100],
+        "source_format": "pdf",
+        "rrf_score": 0.5,
+        "rerank_score": None,
+    }
+
+
+def _chunk_full(cid: str) -> dict:
     return {
         "id": cid,
         "text": _full(cid),
@@ -49,26 +67,28 @@ def _chunk(cid: str) -> dict:
     }
 
 
-def _fake_search(query: str, mode: str = "hybrid", top_k: int = 20) -> list[dict]:
+def _fake_search(query: str, top_k: int = 10, doc_ids: list[str] | None = None) -> list[dict]:
     if query == "termination":
-        return [_chunk("d1:0"), _chunk("d1:1"), _chunk("d1:2")]
-    if query == "terminate":  # 同义词 → top-3 与上一轮高度重叠
-        return [_chunk("d1:1"), _chunk("d1:2"), _chunk("d1:3")]
+        return [_chunk_snippet("d1:0"), _chunk_snippet("d1:1"), _chunk_snippet("d1:2")]
+    if query == "terminate":  # 同义词 → top-3 与上一轮高度重叠，但 snippet 不参与去重
+        return [_chunk_snippet("d1:1"), _chunk_snippet("d1:2"), _chunk_snippet("d1:3")]
     return []
 
 
-def _fake_get_context(chunk_id: str, before: int = 2, after: int = 2) -> list[dict]:
-    if chunk_id == "d1:1":
-        # 底片 d1:1 已由 search 返回过，理应被去重
-        return [_chunk("d1:1"), _chunk("d1:2")]
+def _fake_grep(pattern: str, mode: str = "literal", top_k: int = 10,
+               case_sensitive: bool = False, doc_id: str | None = None) -> list[dict]:
     return []
+
+
+def _fake_get_chunk(chunk_id: str) -> dict:
+    return _chunk_full(chunk_id)
 
 
 def _section_full() -> str:
     return (f"SECTION " * 30).strip()
 
 
-def _fake_get_section(doc_id: str, section_path: list[str] | None = None) -> dict:
+def _fake_get_section(doc_id: str, section_path: list[str]) -> dict:
     return {
         "doc_id": doc_id,
         "section_path": list(section_path or []),
@@ -78,16 +98,12 @@ def _fake_get_section(doc_id: str, section_path: list[str] | None = None) -> dic
     }
 
 
-def _fake_get_referenced_section(doc_id: str, ref: str) -> dict:
-    return _fake_get_section(doc_id, ["Art 1"])  # 与之前的 get_section 同章节
-
-
-def _fake_get_chunk(chunk_id: str) -> dict:
-    return _chunk(chunk_id)
-
-
 def _fake_get_outline(doc_id: str) -> list[dict]:
     return [{"doc_id": doc_id, "section_path": ["Art 1"], "start_offset": 0, "end_offset": 20}]
+
+
+def _fake_list_documents() -> list[dict]:
+    return [{"doc_id": "d1", "title": "doc1", "source_format": "pdf"}]
 
 
 class FakeToolkit:
@@ -98,25 +114,25 @@ class FakeToolkit:
 
     def get_tools(self) -> list[DocumentTool]:
         return [
+            DocumentTool("list_documents", "list", {
+                "type": "object", "properties": {}, "required": [],
+            }, _fake_list_documents),
             DocumentTool("search", "search", {
                 "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
             }, _fake_search),
+            DocumentTool("grep", "grep", {
+                "type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"],
+            }, _fake_grep),
             DocumentTool("get_chunk", "get_chunk", {
                 "type": "object", "properties": {"chunk_id": {"type": "string"}}, "required": ["chunk_id"],
             }, _fake_get_chunk),
-            DocumentTool("get_context", "get_context", {
-                "type": "object", "properties": {"chunk_id": {"type": "string"}}, "required": ["chunk_id"],
-            }, _fake_get_context),
             DocumentTool("get_section", "get_section", {
-                "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+                "type": "object", "properties": {"doc_id": {"type": "string"}, "section_path": {"type": "array"}},
+                "required": ["doc_id", "section_path"],
             }, _fake_get_section),
             DocumentTool("get_document_outline", "get_document_outline", {
                 "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
             }, _fake_get_outline),
-            DocumentTool("get_referenced_section", "get_referenced_section", {
-                "type": "object", "properties": {"doc_id": {"type": "string"}, "ref": {"type": "string"}},
-                "required": ["doc_id", "ref"],
-            }, _fake_get_referenced_section),
         ]
 
 
@@ -144,12 +160,13 @@ def _responses() -> list[dict]:
     return [
         {"content": "", "tool_calls": [_tool_call("t0", "search", {"query": "termination"})]},
         {"content": "", "tool_calls": [_tool_call("t1", "search", {"query": "terminate"})]},
-        {"content": "", "tool_calls": [_tool_call("t2", "get_context", {"chunk_id": "d1:1"})]},
-        {"content": "", "tool_calls": [_tool_call("t3", "get_section", {"doc_id": "d1", "section_path": ["Art 1"]})]},
-        {"content": "", "tool_calls": [_tool_call("t4", "get_referenced_section", {"doc_id": "d1", "ref": "Art 1"})]},
+        {"content": "", "tool_calls": [_tool_call("t2", "get_chunk", {"chunk_id": "d1:1"})]},
+        {"content": "", "tool_calls": [_tool_call("t3", "get_chunk", {"chunk_id": "d1:1"})]},
+        {"content": "", "tool_calls": [_tool_call("t4", "get_section", {"doc_id": "d1", "section_path": ["Art 1"]})]},
+        {"content": "", "tool_calls": [_tool_call("t5", "get_section", {"doc_id": "d1", "section_path": ["Art 1"]})]},
         {"content": json.dumps([{
-            "doc_id": "d1", "start_offset": 0, "end_offset": 20,
-            "section_path": ["Art 1"], "source_chunk_ids": ["d1:0"],
+            "source_chunk_ids": ["d1:0"],
+            "relevance_note": "termination clause",
         }], ensure_ascii=False), "tool_calls": []},
     ]
 
@@ -188,37 +205,31 @@ def main() -> int:
 
     on_searcher, result_on = asyncio.run(_run(dedup=True))
     tool = _tool_results(result_on)
-    assert len(tool) == 5, f"期望 5 条 tool 记录，实际 {len(tool)}"
+    assert len(tool) == 6, f"期望 6 条 tool 记录，实际 {len(tool)}"
 
-    # 第 1 次 search：三片全部首见，正文完整
+    # 第 1/2 次 search：snippet 不参与全文去重，两次都原样返回
     r0 = tool[0]["result"]
-    assert [x["text"] for x in r0] == [_full("d1:0"), _full("d1:1"), _full("d1:2")], "首次 search 应保留全文"
-    # 第 2 次 search：d1:1 / d1:2 已见 → 短标记；d1:3 新的 → 全文
+    assert [x["snippet"] for x in r0] == ["SNIP_d1:0", "SNIP_d1:1", "SNIP_d1:2"], "首次 search 应返回 snippet"
     r1 = tool[1]["result"]
-    assert [x["text"] for x in r1] == [
-        _chunk_stub("d1:1"),
-        _chunk_stub("d1:2"),
-        _full("d1:3"),
-    ], f"二次 search 应去重 d1:1/d1:2: {[x['text'] for x in r1]}"
-    # get_context 带回底片 d1:1/d1:2 → 全去重
-    r2 = tool[2]["result"]
-    assert [_chunk_stub("d1:1"), _chunk_stub("d1:2")] == [x["text"] for x in r2], \
-        f"get_context 底片应去重: {[x['text'] for x in r2]}"
-    # get_section 首次 → 全文保留
-    assert tool[3]["result"]["text"] == _section_full(), "首次 get_section 应保留全文"
-    # get_referenced_section 解析回同一章节 → 去重
-    assert tool[4]["result"]["text"] == _section_stub("Art 1"), \
-        f"同章节二次引用应去重: {tool[4]['result']['text']}"
+    assert [x["snippet"] for x in r1] == ["SNIP_d1:1", "SNIP_d1:2", "SNIP_d1:3"], \
+        "search 同义词重叠时 snippet 不应被 stub"
+    # get_chunk 首次 → 全文保留；第二次同一切片 → stub
+    assert tool[2]["result"]["text"] == _full("d1:1"), "首次 get_chunk 应保留全文"
+    assert tool[3]["result"]["text"] == _chunk_stub("d1:1"), "重复 get_chunk 应去重"
+    # get_section 首次 → 全文；同章节二次 → stub
+    assert tool[4]["result"]["text"] == _section_full(), "首次 get_section 应保留全文"
+    assert tool[5]["result"]["text"] == _section_stub("Art 1"), "同章节二次 get_section 应去重"
 
-    dedup_ok = result_on.token_usage, result_on.status.value
-    if not (on_searcher._deduped_count == 5):  # noqa: SLF001
-        failed.append(f"deduped_count 期望 5，实际 {on_searcher._deduped_count}")  # noqa: SLF001
+    if on_searcher._deduped_count != 2:  # noqa: SLF001  (get_chunk 1 + get_section 1)
+        failed.append(f"deduped_count 期望 2，实际 {on_searcher._deduped_count}")  # noqa: SLF001
 
     # 对照：关闭去重 → 全文全部保留、deduped_count=0、token 更高
     off_searcher, result_off = asyncio.run(_run(dedup=False))
     tool_off = _tool_results(result_off)
-    if [x["text"] for x in tool_off[1]["result"]] != [_full("d1:1"), _full("d1:2"), _full("d1:3")]:
-        failed.append("关闭去重时二次 search 不应被改")
+    if tool_off[3]["result"]["text"] != _full("d1:1"):
+        failed.append("关闭去重时重复 get_chunk 不应被改")
+    if tool_off[5]["result"]["text"] != _section_full():
+        failed.append("关闭去重时重复 get_section 不应被改")
     if off_searcher._deduped_count != 0:  # noqa: SLF001
         failed.append(f"关闭去重时 deduped_count 应 0，实际 {off_searcher._deduped_count}")  # noqa: SLF001
     if not (result_on.token_usage < result_off.token_usage):
@@ -230,10 +241,11 @@ def main() -> int:
             print(f"  - {f}")
         return 1
 
-    print(f"PASS  (dedup on: {dedup_ok[0]} tokens / status={dedup_ok[1]}; "
+    print(f"PASS  (dedup on: {result_on.token_usage} tokens / status={result_on.status.value}; "
           f"dedup off: {result_off.token_usage} tokens)")
-    print("  - 二次 search 去重 d1:1/d1:2 ✓   get_context 底片去重 ✓")
-    print("  - 同章节二次引用去重 ✓   deduped_count=5 ✓   token 下降 ✓")
+    print("  - search/grep snippet 不触发全文去重 ✓")
+    print("  - get_chunk 重复返回被 stub ✓   get_section 同章节二次引用被 stub ✓")
+    print("  - deduped_count=2 ✓   token 下降 ✓")
     return 0
 
 

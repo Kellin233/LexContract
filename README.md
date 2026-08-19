@@ -70,8 +70,8 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 
 - **统一 token 口径**（`src/utils/tokens.py`）：`estimate_tokens` 估算文本 token（中文按 0.6 token/字、其余按空白分词 1 token），消息级 `estimate_messages_tokens` 另计每条消息 4 token 固定开销；全项目上下文 / 预算计算统一走该口径。
 - **窗口兜底**（`src/models/vllm_policy.py`）：`VLLMPolicy.max_context_tokens` 默认 128K，可被 `model.context_window_tokens` 按后端覆盖（deepseek 128000 / mimo 32000）。超阈值时**丢旧轮次**而非截断内容——保留 system 与最近交互，且不拆开 `assistant(tool_calls)` 与紧随的 `tool` 消息；极端情况才对最新一条做内容级截断并打 `[CONTENT_TRUNCATED]` 标记。被截断的 policy 会被对象池丢弃、不再复用。
-- **按需构造输入**：Planner / Reviewer 只喂精简信息（问题、要点、证据 ID 列表），Refiner 是唯一全量读取证据原文的环节，输入预算默认 65536 token（`contract.refiner_input_token_budget`），超预算只告警并记入报告的 `notes / evidence_gap`，暂不裁剪。
-- **检索预算**：`search_vector / search_bm25 / search_hybrid / grep` 四个检索类工具共用同一预算（默认 3 轮 × 每轮 1 个检索调用），预算直接写进 Searcher 系统提示词，改配置即改提示词；`get_*` 展馆工具与最终 JSON 不计入。
+- **按需构造输入**：Planner / Reviewer 只喂精简信息（问题、要点、证据 ID 列表），Refiner 是唯一全量读取证据原文的环节，输入预算默认 65536 token（`contract.refiner_input_token_budget`），超预算只告警并记入报告的 `evidence_gap`，暂不裁剪。
+- **检索预算**：`search / grep` 两个检索类工具共用同一预算（默认 3 轮 × 每轮 1 个检索调用），预算直接写进 Searcher 系统提示词，改配置即改提示词；`get_*` 展馆工具与最终 JSON 不计入。
 - **工具结果去重**：同一 Searcher 多轮内，同一切片 / 同一章节的完整原文只注入一次，重复项正文替换为短标记（保留 id / 偏移 / 得分骨架），可开关做 A/B（`contract.searcher_dedup_tool_results`）。
 - **轮间只传 E###**：`EvidenceStore` 按跨度去重后只传证据 ID，要读正文时按 ID 从库里取出，避免全量字节在 Agent 间流转。
 - **全链路 token 账本**：用 `contextvars` 为每次运行开启账本，Planner / Searcher / Reviewer / Refiner 每次 LLM 调用的入参估算 token 都计入；评测并发实例各自独立 context，互不干扰。
@@ -83,13 +83,13 @@ Reviewer 只判三件事：证据是否覆盖问题 / 是否明显冲突 / 还�
 - **入库**（`src/document/`）：docling 解析 txt / pdf / docx → 结构感知切块（标题为边界优先、超长逐级下切到句子、章节内相邻片带 50 token 重叠、跨章节不重叠，常规入库默认 600 token/片，评测语料入库为 500）→ bge-m3 向量化 → 写入 `documents / chunks` 两表；`full_text` 逐字保留原文，`charspan` 为全文全局字符偏移，保证证据可精确回查。
 - **三种检索模式**（`src/retrieval/postgres.py`）：`vector`（cosine 相似度）/ `bm25`（pg_search `@@@`）/ `hybrid`（加权 RRF 融合，默认权重 0.5 / 0.5、k=60、候选上限 100）。
 - **作用域强制**：`session_id` 必填，无作用域直接拒绝查询；可附加 `doc_ids` 过滤，或在检索时用 `doc_id` 把查询锁定到单篇文档（多文档语料先定位文档再查条款）。
-- **工具化检索**（`src/contract/tools.py`）：Searcher 侧暴露语义 / 关键词 / 融合三档 `search_*` ＋ `grep`（字面 / 正则精确匹配），以及展馆工具 `get_chunk / get_context / get_section / get_document_outline / get_referenced_section`（条款级检索 + 交叉引用跟随）。
+- **工具化检索**（`src/contract/tools.py`）：Searcher 侧暴露 6 个工具——`list_documents`（会话文档元数据）、`search`（hybrid 语义检索，默认融合向量 + BM25 + 重排）、`grep`（字面 / 正则精确匹配），以及展馆工具 `get_chunk / get_section / get_document_outline`（切片与条款级完整原文读取）。`search / grep` 只返回可配置长度的 snippet（`SNIPPET_CHARS`，默认 200 字符），完整原文一律由 `get_chunk / get_section` 获取。
 - **重排**：`retrieval` CLI 查询工具支持 BGE cross-encoder 重排（`BAAI/bge-reranker-v2-m3`，默认开启，`--no-rerank` 关闭）；主证据链检索当前直接使用 RRF 融合结果。
 
 **证据处理**
 
 - **结构**（`src/contract/schemas.py`）：`Evidence` 携带 `evidence_id / question_id / document_id / section_path / page_no / source_chunk_ids / start_offset / end_offset / quote / verified` 等字段；`quote` 必须是 DB 原文的连续切片。
-- **装配**：`EvidenceAssembler` 把检索候选按偏移从 `documents.full_text[start:end]` 物化成连续原文，模型无权改写。
+- **装配**：Searcher 候选只报 `source_chunk_ids + relevance_note`，`EvidenceAssembler` 按最末级 section 自动聚合完整条款（整章超 `MAX_EVIDENCE_SECTION_TOKENS` 时回退命中切片并集，带零空洞连续性校验），quote 一律从 `documents.full_text[start:end]` 截取，模型无权改写。
 - **校验**：`CitationVerifier` 纯程序化逐字符比对 `quote == full_text[start:end]` 并检查切片覆盖无空洞，失败即丢弃并计入 `drop_reasons`，不依赖 LLM 判断。
 - **去重与注册**：`EvidenceStore` 按 `(document_id, start, end)` 去重，为每条证据分配 `E###` 运行期 ID。
 - **引用**：Refiner 正文只用 `[E###]` 占位，后处理由证据元数据生成 `citations`（《文档》章节 + 页码），杜绝模型自编条款号；`supporting_evidence_ids` 只落最支撑最终结论的证据子集。

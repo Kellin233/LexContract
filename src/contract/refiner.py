@@ -35,8 +35,7 @@ Output STRICT JSON only:
   "conclusion": "overall conclusion",
   "points": [{{"claim": "supporting point", "evidence_ids": ["E001", "E002"]}}],
   "supporting_evidence_ids": ["E001", "E003"],
-  "evidence_gap": ["what could not be confirmed"],
-  "notes": "additional notes"
+  "evidence_gap": ["what could not be confirmed"]
 }}
 ONLY the JSON object, no prose."""
 
@@ -111,14 +110,12 @@ class Refiner:
             ],
             supporting_evidence_ids=supporting,
             evidence_gap=[str(g) for g in (data.get("evidence_gap") or [])],
-            notes=str(data.get("notes", "")),
             final_status=final_status,
         )
         # 依据仅落在“最支持结论的证据”子集上（可能是全部，也可能只是一部分）
         result.citations = self._build_citations(supporting, store)
         result.markdown_body = render_markdown(state.original_question, result)
         if _budget_note:
-            result.notes = f"{result.notes}\n[_budget] {_budget_note}".strip()
             result.evidence_gap.append(f"[预算告警] {_budget_note}")
         return result
 
@@ -145,7 +142,6 @@ class Refiner:
             conclusion=f"（Refiner 生成失败，原因：{reason}。以下仅列出支撑证据，未做综合结论。）",
             supporting_evidence_ids=store.all_ids(),
             evidence_gap=["当前未能生成综合结论，请结合下方证据自行判断。"],
-            notes=reason,
             final_status=final_status,
         )
         result.citations = self._build_citations(store.all_ids(), store)

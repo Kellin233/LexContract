@@ -1,13 +1,11 @@
-"""Hermetic 验证：新检索工具（search_* 拆分 + grep）的预算与去重（不依赖 DB / LLM / embedding）。
+"""Hermetic 验证：6 工具收敛后的检索预算与 snippet 化（不依赖 DB / LLM / embedding）。
 
-search 的三种模式拆成 search_vector / search_bm25 / search_hybrid 三个独立工具，另加 grep
-（字面/正则精确匹配）；四个检索工具共享同一检索预算（总轮数 + 每轮检索调用数）。本脚本验证：
-
-1. 同一切片无论先经 search_* 还是 grep 首次注入原文唯一（共用 _seen_chunk_ids 去重集合）；
-2. 同一轮里第二个检索调用被"每轮超限"note 拦截（per-round cap）；
-3. 跨轮累计超过 round 上限被拦截；grep 单独算一个检索轮；
-4. grep 的 pattern 记入 search_queries / searched；
-5. build_system_prompt 列出四个检索工具且随预算参数化。
+验证：
+1. search/grep 输出含 snippet、不含 text；snippet 长度受 SNIPPET_CHARS 控制；
+2. search 与 grep 共享同一检索预算（总轮数 + 每轮检索调用数），grep 单独算一轮；
+3. 同轮第二个检索调用被 per-round 拦截；跨轮累计超 round 上限被拦截；
+4. grep 的 pattern 记入 search_queries；被拦截的调用不计入；
+5. DocumentToolkit.get_tools() 只注册 6 个工具，提示词随预算参数化。
 
 用法: python tests/grep_tool_check.py
 """
@@ -23,47 +21,33 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.contract.tools import DocumentTool
+from src.contract.tools import DocumentTool, DocumentToolkit, _around_snippet, _head_snippet
 from src.contract.worker import Searcher, build_system_prompt
 from src.orchestrator.schemas import SubTask, TaskType
-
-
-def _full(cid: str) -> str:
-    return (f"TEXT_{cid} " * 25).strip()
-
-
-def _chunk_stub(cid: str) -> str:
-    return f"[already shown earlier — chunk {cid}; full text omitted]"
 
 
 def _chunk(cid: str) -> dict:
     return {
         "id": cid,
-        "text": _full(cid),
+        "snippet": f"SNIP_{cid}",
         "doc_id": cid.split(":")[0],
         "doc_title": "d1",
+        "session_id": "S1",
         "section_path": ["Art 1"],
         "page_no": 1,
         "charspan": [0, 100],
         "source_format": "pdf",
+        "rrf_score": 0.5,
+        "rerank_score": None,
     }
 
 
-def _fake_search_bm25(query: str, top_k: int = 20) -> list[dict]:
+def _fake_search(query: str, top_k: int = 10, doc_ids: list[str] | None = None) -> list[dict]:
     return [_chunk("d1:0"), _chunk("d1:1")]
 
 
-def _fake_search_vector(query: str, top_k: int = 20) -> list[dict]:
-    return [_chunk("d1:2"), _chunk("d1:3")]
-
-
-def _fake_search_hybrid(query: str, top_k: int = 20) -> list[dict]:
-    return []
-
-
-def _fake_grep(pattern: str, mode: str = "literal", top_k: int = 20,
-               case_sensitive: bool = False) -> list[dict]:
-    # 与 search_bm25 有重叠切片 d1:1，用来验证跨工具共用去重集合
+def _fake_grep(pattern: str, mode: str = "literal", top_k: int = 10,
+               case_sensitive: bool = False, doc_id: str | None = None) -> list[dict]:
     if pattern == "terminat":
         return [_chunk("d1:1"), _chunk("d1:2")]
     if pattern == "zzz":
@@ -71,24 +55,48 @@ def _fake_grep(pattern: str, mode: str = "literal", top_k: int = 20,
     return []
 
 
+def _fake_list_documents() -> list[dict]:
+    return [{"doc_id": "d1", "title": "d1", "source_format": "pdf"}]
+
+
+def _fake_get_chunk(chunk_id: str) -> dict | None:
+    return None
+
+
+def _fake_get_section(doc_id: str, section_path: list[str]) -> dict | None:
+    return None
+
+
+def _fake_get_outline(doc_id: str) -> list[dict]:
+    return []
+
+
 class FakeToolkit:
+    """只实现 Searcher 用到的 set_scope / get_tools，handler 全部为纯函数伪实现。"""
+
     def set_scope(self, session_id: str, doc_ids: list[str] | None = None) -> None:
         pass
 
     def get_tools(self) -> list[DocumentTool]:
         return [
-            DocumentTool("search_bm25", "bm25", {
+            DocumentTool("list_documents", "list", {
+                "type": "object", "properties": {}, "required": [],
+            }, _fake_list_documents),
+            DocumentTool("search", "search", {
                 "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
-            }, _fake_search_bm25),
-            DocumentTool("search_vector", "vector", {
-                "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
-            }, _fake_search_vector),
-            DocumentTool("search_hybrid", "hybrid", {
-                "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"],
-            }, _fake_search_hybrid),
+            }, _fake_search),
             DocumentTool("grep", "grep", {
                 "type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"],
             }, _fake_grep),
+            DocumentTool("get_chunk", "get_chunk", {
+                "type": "object", "properties": {"chunk_id": {"type": "string"}}, "required": ["chunk_id"],
+            }, _fake_get_chunk),
+            DocumentTool("get_section", "get_section", {
+                "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+            }, _fake_get_section),
+            DocumentTool("get_document_outline", "get_document_outline", {
+                "type": "object", "properties": {"doc_id": {"type": "string"}}, "required": ["doc_id"],
+            }, _fake_get_outline),
         ]
 
 
@@ -112,23 +120,23 @@ def _tool_call(uid: str, name: str, arguments: dict) -> dict:
 
 def _responses() -> list[dict]:
     return [
-        # 轮1：search_bm25（首见两片）
-        {"content": "", "tool_calls": [_tool_call("t0", "search_bm25", {"query": "termination"})]},
-        # 轮2：grep（d1:1 已见→stub；d1:2 新→全文）——验证跨工具去重 + grep 独立算一轮
+        # 轮1：search（首见两片）
+        {"content": "", "tool_calls": [_tool_call("t0", "search", {"query": "termination"})]},
+        # 轮2：grep 独立算一轮
         {"content": "", "tool_calls": [_tool_call("t1", "grep", {"pattern": "terminat"})]},
-        # 轮3：同轮两个检索调用 → search_vector 执行，grep 被 per-round 拦截
+        # 轮3：同轮两个检索调用 → search 执行，grep 被 per-round 拦截
         {"content": "", "tool_calls": [
-            _tool_call("t2", "search_vector", {"query": "terminate"}),
+            _tool_call("t2", "search", {"query": "terminate"}),
             _tool_call("t3", "grep", {"pattern": "excluded"}),
         ]},
         # 轮4：grep 新切片（round=3 仍可用）
         {"content": "", "tool_calls": [_tool_call("t4", "grep", {"pattern": "zzz"})]},
-        # 轮5：round 上限已满（4 轮）→ 被 round-budget 拦截
+        # 轮5：round 上限已满 → 被 round-budget 拦截
         {"content": "", "tool_calls": [_tool_call("t5", "grep", {"pattern": "blocked"})]},
         # 最终：输出证据 JSON
         {"content": json.dumps([{
-            "doc_id": "d1", "start_offset": 0, "end_offset": 20,
-            "section_path": ["Art 1"], "source_chunk_ids": ["d1:0"],
+            "source_chunk_ids": ["d1:0"],
+            "relevance_note": "termination clause",
         }], ensure_ascii=False), "tool_calls": []},
     ]
 
@@ -166,42 +174,60 @@ def _tool_results(result) -> list[dict]:
 
 def main() -> int:
     failed: list[str] = []
+
+    # snippet 函数：长度受 SNIPPET_CHARS 控制
+    long_text = "x" * 500
+    if len(_head_snippet(long_text)) != 200:
+        failed.append(f"_head_snippet 默认应 200 字符，实际 {len(_head_snippet(long_text))}")
+    if len(_head_snippet(long_text, 50)) != 50:
+        failed.append("_head_snippet 应支持显式 limit")
+    around = _around_snippet("abcXYZdef", 3, 6, 50)
+    if "XYZ" not in around or len(around) > 50:
+        failed.append(f"_around_snippet 应以命中为中心且不超 limit: {around!r}")
+
+    # 工具注册面：恰好 6 个
+    real_tk = DocumentToolkit()
+    names = sorted(t.name for t in real_tk.get_tools())
+    expected = ["get_chunk", "get_document_outline", "get_section", "grep", "list_documents", "search"]
+    if names != expected:
+        failed.append(f"工具注册应为 {expected}，实际 {names}")
+
     searcher, result = asyncio.run(_run())
     tool = _tool_results(result)
 
-    # 轮1 search_bm25：两片首见全文
+    # 轮1 search：两片 snippet（不含 text）
     r0 = tool[0]["result"]
-    assert [x["text"] for x in r0] == [_full("d1:0"), _full("d1:1")], f"轮1 search_bm25 应保留全文: {[x['text'] for x in r0]}"
-    # 轮2 grep：d1:1 与 search_bm25 共享去重集合 → stub；d1:2 新 → 全文
+    assert all("text" not in x for x in r0), "search 不应返回 text"
+    assert [x["snippet"] for x in r0] == ["SNIP_d1:0", "SNIP_d1:1"], "search 应返回 snippet"
+    # 轮2 grep：pattern 计入 search_queries，输出为 snippet
     r1 = tool[1]["result"]
-    assert [x["text"] for x in r1] == [_chunk_stub("d1:1"), _full("d1:2")], \
-        f"grep 应复用 search 已见集合: {[x['text'] for x in r1]}"
-    # 轮3：search_vector 执行（d1:2 已见→stub，d1:3 新）；同轮 grep 被 per-round 拦截
+    assert all("text" not in x for x in r1), "grep 不应返回 text"
+    assert [x["snippet"] for x in r1] == ["SNIP_d1:1", "SNIP_d1:2"], "grep 应返回 snippet"
+    # 轮3：search 执行；同轮 grep 被 per-round 拦截
     r2 = tool[2]["result"]
-    assert [x["text"] for x in r2] == [_chunk_stub("d1:2"), _full("d1:3")], \
-        f"轮3 search_vector 应去重 d1:2: {[x['text'] for x in r2]}"
-    assert hasattr(tool[3]["result"], "get") and tool[3]["result"].get("error", "").startswith("At most 1 retrieval call"), \
+    assert [x["snippet"] for x in r2] == ["SNIP_d1:0", "SNIP_d1:1"], "轮3 search 应返回 snippet"
+    assert tool[3]["result"].get("error", "").startswith("At most 1 retrieval call"), \
         f"同轮第二个检索调用应被 per-round 拦截: {tool[3]['result']}"
-    # 轮4 grep：新切片全文
-    assert [x["text"] for x in tool[4]["result"]] == [_full("d1:4")], f"轮4 grep 新切片应全文: {tool[4]['result']}"
+    # 轮4 grep：新命中
+    assert [x["snippet"] for x in tool[4]["result"]] == ["SNIP_d1:4"], "轮4 grep 应返回新切片 snippet"
     # 轮5：round 上限耗尽 → 拦截
-    assert "Search-round budget exhausted" in str(tool[5]["result"]), f"超轮数应被 round 拦截: {tool[5]['result']}"
+    assert "Search-round budget exhausted" in str(tool[5]["result"]), f"超轮数应被拦截: {tool[5]['result']}"
 
-    if searcher._deduped_count != 2:  # noqa: SLF001  (重复：d1:1、d1:2 各 1 次)
-        failed.append(f"deduped_count 期望 2，实际 {searcher._deduped_count}")  # noqa: SLF001
-    # grep 的 pattern 记入 search_queries，且 tracked 到拦截前的合法调用
+    if searcher._deduped_count != 0:  # noqa: SLF001  (snippet 不参与全文去重)
+        failed.append(f"snippet 不应触发全文去重，实际 {searcher._deduped_count}")  # noqa: SLF001
+
     sq = result.output.search_queries
     for expect in ("termination", "terminat", "terminate", "zzz"):
         if expect not in sq:
             failed.append(f"search_queries 缺 {expect!r}，实际 {sq}")
-    if any(x in sq for x in ("excluded", "blocked")):  # 被拦截的调用不应计入
+    if any(x in sq for x in ("excluded", "blocked")):
         failed.append(f"被拦截的检索不应记入 search_queries: {sq}")
     if not result.output.searched:
         failed.append("searched 应为 True")
 
-    # 提示词：列出四检索工具 + 预算参数化
+    # 提示词：列出 search/grep + 预算参数化
     p_31 = build_system_prompt(3, 1)
-    for tok in ("search_vector", "search_bm25", "search_hybrid", "grep",
+    for tok in ("search", "grep", "get_section", "get_chunk", "get_document_outline", "list_documents",
                 "at most 3 ROUNDS may issue retrieval calls", "1 retrieval call per such round"):
         if tok not in p_31:
             failed.append(f"build_system_prompt(3,1) 缺 {tok!r}")
@@ -217,10 +243,10 @@ def main() -> int:
         return 1
 
     print(f"PASS  (tokens={result.token_usage}, status={result.status.value}; "
-          f"search_queries={sq}; deduped={searcher._deduped_count})")  # noqa: SLF001
-    print("  - 跨工具(±grep)去重集合共享 ✓   grep 独立算一轮 ✓")
-    print("  - 同轮第二个检索被 per-round 拦截 ✓   超 round 上限被拦截 ✓   被拦截调用不入 search_queries ✓")
-    print("  - 提示词列出四检索工具且随预算参数化 ✓")
+          f"search_queries={sq}; tools={names})")
+    print("  - search/grep 只返回 snippet、不含 text ✓   snippet 长度受 SNIPPET_CHARS 控制 ✓")
+    print("  - grep 独立算一轮 ✓   同轮第二个检索被 per-round 拦截 ✓   超 round 上限被拦截 ✓")
+    print("  - 被拦截调用不入 search_queries ✓   工具注册恰为 6 个 ✓")
     return 0
 
 

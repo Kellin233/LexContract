@@ -1,0 +1,31 @@
+{
+  "mode": "legalbenchrag",
+  "total": 3,
+  "seed": 42,
+  "weight": "count",
+  "samples": {
+    "contractnli": {
+      "count": 3,
+      "queries": [
+        "contractnli-69",
+        "contractnli-838",
+        "contractnli-781"
+      ],
+      "doc_ids": [
+        "contractnli/01_Bosch-Automotive-Service-Solutions-Mutual-Non-Disclosure-Agreement-7-12-17.txt",
+        "contractnli/AfriGIS_Client-NDA_Template_2019.txt",
+        "contractnli/Aspiegel_NDA_template.txt",
+        "contractnli/BCG-Mutual-NDA.txt",
+        "contractnli/Evelozcity%20OESA%20NDA.txt",
+        "contractnli/IBC-PMS-NDA-agreement.txt",
+        "contractnli/INFOMAGNET%20NDA.txt",
+        "contractnli/Non-Disclosure-NDA-UW-Oshkosh_FINALV2.txt",
+        "contractnli/RROI_Confidentiality_Agreement_Final.txt",
+        "contractnli/Standard%20NDA%20by%20Axial.txt",
+        "contractnli/TSE-TSE-OK-WHK-Mutual-NDA-Fill-in-Blanks-4-29-2019.txt",
+        "contractnli/ceii-and-nda.txt",
+        "contractnli/oceaneering-non-disclosure-agreement.txt"
+      ]
+    }
+  }
+}

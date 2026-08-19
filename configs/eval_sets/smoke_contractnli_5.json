@@ -1,0 +1,55 @@
+{
+  "mode": "contractnli",
+  "subset": "test",
+  "total": 5,
+  "seed": 42,
+  "label_counts": {
+    "contradiction": 220,
+    "entailment": 968,
+    "neutral": 903
+  },
+  "label_counts_sampled": {
+    "contradiction": 5,
+    "entailment": 0,
+    "neutral": 0
+  },
+  "label_proportions_orig": {
+    "contradiction": 0.1052,
+    "entailment": 0.4629,
+    "neutral": 0.4319
+  },
+  "instances": [
+    {
+      "instance_id": "contractnli-test-518-4",
+      "premise_id": "518",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-581-4",
+      "premise_id": "581",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-544-5",
+      "premise_id": "544",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-519-11",
+      "premise_id": "519",
+      "label": "contradiction"
+    },
+    {
+      "instance_id": "contractnli-test-513-4",
+      "premise_id": "513",
+      "label": "contradiction"
+    }
+  ],
+  "contracts": [
+    "513",
+    "518",
+    "519",
+    "544",
+    "581"
+  ]
+}

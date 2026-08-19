@@ -131,7 +131,6 @@ class RefinerResult(BaseModel):
     evidence_gap: list[str] = Field(default_factory=list, description="当前文档中未能确认的缺口")
     citations: list[Citation] = Field(default_factory=list)
     final_status: FinalStatus = FinalStatus.PARTIALLY_SUFFICIENT
-    notes: str = Field(default="")
     # 保留行文原文（含 [E###] 引用占位），便于人读与调试
     markdown_body: str = Field(default="")
 

@@ -66,7 +66,7 @@ You are a contract-clause investigation planner. Earlier rounds have not yet cov
 ## Missing points reported by the Reviewer
 {missing_aspects}
 
-## Conflicts found (background only; do not use to cover missing points)
+## Conflicts found (potential conflicts between evidence; may warrant investigation)
 {conflicts}
 
 ## Output format (JSON only, no extra text)
@@ -81,10 +81,10 @@ You are a contract-clause investigation planner. Earlier rounds have not yet cov
 }}
 
 ## Rules
-1. Generate questions only for the missing points; do not repeat existing questions.
+1. Generate questions for the missing points first; conflicts may also indicate clauses not yet captured (e.g. exceptions, cross-references, amendments, or definitions that would explain the conflict) — add targeted questions to verify them when relevant. Do not repeat existing questions.
 2. Each question still describes only "what to investigate", without conclusions.
 3. question_id numbering continues sequentially from Q{n}.
-4. Generate at most 3 new investigation questions per call; do not pad with irrelevant questions."""
+4. Generate at most 3 new investigation questions per call; missing points take priority over conflict-driven ones; do not pad with irrelevant questions."""
 
 
 def _extract_json_object(text: str) -> dict | None:

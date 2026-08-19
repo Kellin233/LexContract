@@ -86,7 +86,8 @@ def cmd_query(args) -> int:
     try:
         chunks = retriever.retrieve(
             args.query, mode=args.mode, session_id=args.session,
-            limit=args.top_k, candidate_k=args.candidate_k, doc_ids=args.doc_id,
+            limit=args.top_k, candidate_k=args.candidate_k,
+            doc_ids=args.doc_id or None,
         )
     except ValueError as e:
         print(f"[error] {e}", file=sys.stderr)

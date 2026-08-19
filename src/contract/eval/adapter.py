@@ -27,13 +27,12 @@ __all__ = ["LegalBenchAdapter", "ContractNLIAdapter"]
 _LEGALBENCH_PROMPT = """\
 You are a meticulous contract-evidence retrieval assistant. Your ONLY job is to locate and capture the ORIGINAL text passages of the contract documents relevant to the query. The evidence will be scored by its exact character offsets, so capture COMPLETE passages, not fragments.
 
-Use the retrieval tools (search / get_context / get_section / get_document_outline / get_referenced_section) to find every passage that answers the query. Do NOT stop at the first hit.
+Use the retrieval tools (search / grep / get_section / get_chunk / get_document_outline) to find every passage that answers the query. Do NOT stop at the first hit.
 
 FINAL OUTPUT: JSON array only (may be empty):
 [
-  {{"doc_id": "...", "start_offset": 0, "end_offset": 0,
-    "section_path": [], "source_chunk_ids": ["..."], "page_no": 0,
-    "relevance_note": "...", "retrieval_score": 0.8}}
+  {{"source_chunk_ids": ["doc-xxx:3", "doc-xxx:4"],
+    "relevance_note": "..."}}
 ]
 
 Query: {query}
@@ -99,7 +98,7 @@ class LegalBenchAdapter:
             for row in cur.fetchall():
                 self._doc_map[row[0]] = row[1] or ""
 
-    def deterministic_rank(self, query: str, top_k: int = 64, mode: str = "hybrid") -> list[LegalChunkHit]:
+    def deterministic_rank(self, query: str, top_k: int = 64) -> list[LegalChunkHit]:
         """混合检索 top-k 排名（Recall@k / MRR 的排序源）。
 
         返回按排名有序的命中，每条的 span 来自 DB chunk.charspan（与 raw corpus 对齐）。
@@ -107,7 +106,7 @@ class LegalBenchAdapter:
         from ..tools import DocumentToolkit
 
         toolkit = DocumentToolkit(session_id=self.session_id, doc_ids=self.doc_ids)
-        rows = toolkit.search(query, mode=mode, top_k=top_k)
+        rows = toolkit.search(query, top_k=top_k)
         hits: list[LegalChunkHit] = []
         for rank, row in enumerate(rows, 1):
             span = [int(x) for x in (row.get("charspan") or []) if x is not None]
@@ -116,14 +115,13 @@ class LegalBenchAdapter:
             score = (
                 row.get("rrf_score")
                 or row.get("rerank_score")
-                or row.get("bm25_score")
             )
             hits.append(LegalChunkHit(
                 rank=rank,
                 doc_id=row.get("doc_id", ""),
                 file_path=self.doc_id_to_file_path(row.get("doc_id", "")),
                 span=span,
-                text=row.get("text"),
+                text=row.get("snippet"),
                 score=float(score) if score is not None else None,
             ))
         return hits
@@ -242,8 +240,7 @@ Output STRICT JSON only:
   "conclusion": "entailment" | "contradiction" | "neutral",
   "points": [{{"claim": "supporting point", "evidence_ids": ["E001", "E002"]}}],
   "supporting_evidence_ids": ["E001", "E003"],
-  "evidence_gap": ["what could not be confirmed"],
-  "notes": "additional notes"
+  "evidence_gap": ["what could not be confirmed"]
 }}
 ONLY the JSON object, no prose."""
 

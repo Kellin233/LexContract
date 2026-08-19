@@ -1,8 +1,8 @@
 """DocumentToolkit：Searcher 的检索工具面。
 
-包装 src/retrieval 的 PostgresRetriever（search/get_chunk/get_context），
-并新增条款级工具（get_section / get_document_outline / get_referenced_section），
-供 Worker 把碎片 Chunk 恢复成完整原文条款，以及跟随“除第X条外”这类交叉引用。
+包装 src/retrieval 的 PostgresRetriever（hybrid search / grep / get_chunk），
+以及条款级工具（get_section / get_document_outline），
+供 Worker 通过 snippet 定位后恢复完整原文条款。
 
 所有方法返回 JSON 可序列化的 dict/list，方便直接作为 tool message 内容。
 """
@@ -13,74 +13,52 @@ import re
 import threading
 from typing import Any
 
-
-# ---------- 引用解析启发式 ----------
-# “第14条” / “第 14.3 条” / “14.3” / “Article 14” / “Section 4.2”
-_CH_ART_RE = re.compile(r"第\s*([0-9０-９]+|[一二三四五六七八九十百千万]+)\s*条\s*(?:[\.．]?\s*(\d+(?:\.\d+)*))?")
-_CH_SEC_RE = re.compile(r"^第\s*([0-9０-９]+|[一二三四五六七八九十百千万]+)\s*(?:章|节)")
-_EN_RE = re.compile(r"(?:Article|Section|Clause)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
-_ARABIC_RE = re.compile(r"^(\d+(?:\.\d+)*)")
-
-_CJK_DIGITS = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+from src.retrieval import config as _retrieval_config
 
 
-def _cjk_to_int(s: str) -> int | None:
-    total = 0
-    section = 0
-    digit = 0
-    for ch in s:
-        if ch in "零〇":
-            digit = 0
-        elif ch in _CJK_DIGITS:
-            digit = _CJK_DIGITS[ch]
-        elif ch == "十":
-            section = (section or 1) * 10 if digit == 0 else (section + digit) * 10
-            digit = 0
-        elif ch == "百":
-            section += (digit or 1) * 100
-            digit = 0
-        elif ch == "千":
-            section += (digit or 1) * 1000
-            digit = 0
-    total = section + digit
-    return total if total else None
+def _head_snippet(text: str, limit: int | None = None) -> str:
+    """取文本开头不超过 limit（默认 SNIPPET_CHARS）字符的片段（search 用）。"""
+    limit = _retrieval_config.SNIPPET_CHARS if limit is None else limit
+    return text[:max(0, limit)]
 
 
-def _normalize_ref_number(ref: str) -> str | None:
-    """把“第14条 / 第 十四 条 / Article 14 / 4.2”归一化为数字串（最长前缀主编号 + 子编号）。"""
-    ref = ref.strip()
-    m = _CH_ART_RE.search(ref)
-    if m:
-        if m.group(1).isdigit() or set(m.group(1)) <= set("０１２３４５６７８９"):
-            main = str(int(m.group(1).translate(str.maketrans("０１２３４５６７８９", "0123456789"))))
-        else:
-            main = str(_cjk_to_int(m.group(1)) or 0)
-        sub = m.group(2) or ""
-        return f"{main}.{sub}" if sub else main
-    m = _EN_RE.search(ref)
-    if m:
-        return m.group(1)
-    pure = ref.replace("第", "").replace("条", "").replace(" ", "").strip()
-    m = _ARABIC_RE.match(pure)
-    if m:
-        return m.group(1)
-    return None
+def _around_snippet(text: str, start: int, end: int, limit: int | None = None) -> str:
+    """以命中区间 [start, end) 为中心截取长度不超过 limit 的窗口（grep 用）。"""
+    limit = _retrieval_config.SNIPPET_CHARS if limit is None else limit
+    if limit <= 0:
+        return ""
+    if end - start >= limit:
+        return text[start : start + limit]
+    half = (limit - (end - start)) // 2
+    lo = max(0, start - half)
+    return text[lo : lo + limit]
 
 
-def _label_number(label: str) -> str | None:
-    """提取章节标签（如 “12.3 违约责任” / “第14条 不可抗力”）的前导编号串。"""
-    m = _CH_ART_RE.search(label)
-    if m:
-        if m.group(1).isdigit() or set(m.group(1)) <= set("０１２３４５６７８９"):
-            main = str(int(m.group(1).translate(str.maketrans("０１２３４５６７８９", "0123456789"))))
-        else:
-            main = str(_cjk_to_int(m.group(1)) or 0)
-        sub = m.group(2) or ""
-        return f"{main}.{sub}" if sub else main
-    m = _ARABIC_RE.match(label.strip())
-    if m:
-        return m.group(1)
-    return None
+def _split_chunk_id(chunk_id: str) -> tuple[str, int]:
+    """把切片 ID（{doc_id}:{index}）还原为 (doc_id, index)。
+
+    doc_id 本身可能含冒号（如 "maud:VEREIT_...txt"），必须从右侧切分。
+    """
+    doc_id, _, idx = chunk_id.rpartition(":")
+    return doc_id, int(idx)
+
+
+def _search_row_to_item(r) -> dict:
+    """把 RetrievedChunk 裁剪为 search 工具输出：snippet + 元数据 + rrf/rerank 得分。"""
+    data = r.model_dump(mode="json")
+    return {
+        "id": data["id"],
+        "doc_id": data["doc_id"],
+        "doc_title": data["doc_title"],
+        "session_id": data["session_id"],
+        "page_no": data["page_no"],
+        "section_path": data["section_path"],
+        "charspan": data["charspan"],
+        "source_format": data["source_format"],
+        "snippet": _head_snippet(data["text"]),
+        "rrf_score": data.get("rrf_score"),
+        "rerank_score": data.get("rerank_score"),
+    }
 
 
 class DocumentToolkit:
@@ -102,40 +80,33 @@ class DocumentToolkit:
     # ------------------------------------------------------------------
     # 基础能力
     # ------------------------------------------------------------------
-    def search(self, query: str, mode: str = "hybrid", top_k: int = 20,
-               doc_id: str | None = None) -> list[dict]:
-        """混合/向量/BM25 检索，返回候选 Chunk（含元数据与得分）。
+    def search(self, query: str, top_k: int = 10,
+               doc_ids: list[str] | None = None) -> list[dict]:
+        """混合检索（向量 + BM25 RRF + 重排），返回候选切片（snippet + 元数据 + 得分）。
 
-        doc_id 非空时把检索收敛到单篇文档（多文档语料里先定位文档再查条款）。
+        doc_ids 非空时把检索收敛到指定文档集合；空列表/None 表示整个会话语料
+        （底层对空列表会生成 AND false，这里统一转 None）。
+        snippet 取切片头部窗口，长度由后端配置 SNIPPET_CHARS 控制，不对 Agent 暴露。
         """
+        limit = max(1, min(top_k, 20))
+        scoped = list(doc_ids) if doc_ids else None
         with self._lock:
             rows = self.retriever.retrieve(
                 query,
-                mode=mode,
+                mode="hybrid",
                 session_id=self.session_id,
-                limit=max(top_k, 1),
-                doc_ids=[doc_id] if doc_id else (self._doc_ids or None),
+                limit=limit,
+                doc_ids=scoped or (self._doc_ids or None),
             )
-        return [r.model_dump(mode="json") for r in rows]
+        return [_search_row_to_item(r) for r in rows]
 
-    def search_vector(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
-        """向量语义检索（bge-m3 相似度），擅长整句含义 / 同义表述。"""
-        return self.search(query, mode="vector", top_k=top_k, doc_id=doc_id)
-
-    def search_bm25(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
-        """BM25 关键词排名检索，擅长命名词面关键词。"""
-        return self.search(query, mode="bm25", top_k=top_k, doc_id=doc_id)
-
-    def search_hybrid(self, query: str, top_k: int = 20, doc_id: str | None = None) -> list[dict]:
-        """混合检索（向量 + BM25 RRF 融合），不确定用哪种时的稳妥默认。"""
-        return self.search(query, mode="hybrid", top_k=top_k, doc_id=doc_id)
-
-    def grep(self, pattern: str, mode: str = "literal", top_k: int = 20,
+    def grep(self, pattern: str, mode: str = "literal", top_k: int = 10,
              case_sensitive: bool = False, doc_id: str | None = None) -> list[dict]:
-        """在切片原文里做精确字符匹配（literal 字面 / regex POSIX 正则），返回命中切片。
+        """在切片原文里做精确字符匹配（literal 字面 / regex 正则），返回命中切片。
 
         与 search 系列不同：grep 只按原文是否包含 pattern 过滤，不做打分排序，
-        按文档内顺序返回，并附 match_count（该切片内命中次数）。
+        按文档内顺序返回，并附 match_count（该切片内命中次数）与 snippet
+        （首个命中位置前后各约 SNIPPET_CHARS/2 字符窗口）。
 
         doc_id 非空时把匹配收敛到单篇文档（多文档语料里先定位文档再精确确认条款）。
         """
@@ -187,11 +158,22 @@ class DocumentToolkit:
         for r in rows:
             text = r[1]
             if mode == "regex":
+                m = rx.search(text)
                 n = len(rx.findall(text))
+                span = (m.start(), m.end()) if m else None
             else:  # 与 SQL 过滤口径一致：case_sensitive=False 时计数也不区分大小写
-                n = text.count(pattern) if case_sensitive else text.lower().count(pattern.lower())
+                if case_sensitive:
+                    i = text.find(pattern)
+                    n = text.count(pattern)
+                else:
+                    low = text.lower()
+                    p = pattern.lower()
+                    i = low.find(p)
+                    n = low.count(p)
+                span = (i, i + len(pattern)) if i >= 0 else None
+            snippet = _around_snippet(text, span[0], span[1]) if span else _head_snippet(text)
             out.append({
-                "id": r[0], "text": text, "doc_id": r[2], "doc_title": r[3],
+                "id": r[0], "snippet": snippet, "doc_id": r[2], "doc_title": r[3],
                 "section_path": list(r[4] or []), "page_no": r[5] or 0,
                 "charspan": list(r[6] or []), "source_format": r[7] or "",
                 "match_count": n, "mode": mode,
@@ -220,41 +202,6 @@ class DocumentToolkit:
             "charspan": list(row[6] or []), "source_format": row[7] or "",
         }
 
-    def get_context(self, chunk_id: str, before: int = 2, after: int = 2) -> list[dict]:
-        """同文档内按 chunk_index 取前后邻居切片（保持阅读顺序）。"""
-        from src.retrieval.store import connect
-
-        base = self.get_chunk(chunk_id)
-        if base is None:
-            return []
-        with connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT chunk_index FROM chunks WHERE id = %s", (chunk_id,)
-            )
-            row = cur.fetchone()
-            if row is None:
-                return []
-            idx = row[0]
-            lo, hi = max(0, idx - max(before, 0)), idx + max(after, 0)
-            cur.execute(
-                """
-                SELECT c.id, c.text, c.doc_id, d.title, c.section_path, c.page_no, c.charspan, d.source_format
-                FROM chunks c JOIN documents d ON d.doc_id = c.doc_id
-                WHERE c.doc_id = %s AND c.chunk_index BETWEEN %s AND %s
-                ORDER BY c.chunk_index
-                """,
-                (base["doc_id"], lo, hi),
-            )
-            rows = cur.fetchall()
-        return [
-            {
-                "id": r[0], "text": r[1], "doc_id": r[2], "doc_title": r[3],
-                "section_path": list(r[4] or []), "page_no": r[5] or 0,
-                "charspan": list(r[6] or []), "source_format": r[7] or "",
-            }
-            for r in rows
-        ]
-
     # ------------------------------------------------------------------
     # 条款级能力
     # ------------------------------------------------------------------
@@ -279,6 +226,27 @@ class DocumentToolkit:
         if row is None:
             return None
         return {"doc_id": row[0], "title": row[1] or "", "source_format": row[2] or ""}
+
+    def list_documents(self) -> list[dict]:
+        """返回当前会话内全部文档的元数据（doc_id/title/source_format），不含正文。"""
+        if not self.session_id:
+            raise ValueError("refusing an unscoped list_documents (session_id is empty)")
+        from src.retrieval.store import connect
+
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT doc_id, title, source_format
+                FROM documents
+                WHERE session_id = %s
+                ORDER BY doc_id
+                """,
+                (self.session_id,),
+            )
+            return [
+                {"doc_id": r[0], "title": r[1] or "", "source_format": r[2] or ""}
+                for r in cur.fetchall()
+            ]
 
     def get_page_for_span(self, doc_id: str, start: int, end: int) -> int:
         """返回覆盖 [start, end] 区间切片的起始页码（找不到则 0）。"""
@@ -388,26 +356,6 @@ class DocumentToolkit:
             for r in rows
         ]
 
-    def get_referenced_section(self, doc_id: str, ref: str) -> dict | None:
-        """跟随条款间引用（“除第14条外”/“Article 4.2”）返回对应章节原文。"""
-        ref_num = _normalize_ref_number(ref)
-        if ref_num is None:
-            return None
-        outline = self.get_document_outline(doc_id)
-        # 精确：章节标签前导编号 == 引用编号
-        for o in outline:
-            label = o["section_path"][-1] if o["section_path"] else ""
-            num = _label_number(label)
-            if num == ref_num:
-                return self.get_section(doc_id, o["section_path"])
-        # 宽松：引用主编号是某章节编号（或其父编号）的前缀
-        for o in outline:
-            label = o["section_path"][-1] if o["section_path"] else ""
-            num = _label_number(label)
-            if num and (num.startswith(ref_num) or ref_num.startswith(num)):
-                return self.get_section(doc_id, o["section_path"])
-        return None
-
     # ------------------------------------------------------------------
     # 工具适配面（供 Searcher 使用）
     # ------------------------------------------------------------------
@@ -415,59 +363,44 @@ class DocumentToolkit:
         """构建 OpenAI function-calling 工具对象列表。"""
         return [
             DocumentTool(
-                name="search_vector",
+                name="list_documents",
                 description=(
-                    "Semantic search (vector): returns passages similar in MEANING, good for whole-clause "
-                    "meaning and paraphrases. Use when you need semantically relevant clauses."
+                    "Lists the documents available in the current session "
+                    "(doc_id, title, source format), without full text. "
+                    "Call this first to discover which documents exist; doc_ids must be copied verbatim."
                 ),
                 parameters={
                     "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query (synonyms are allowed)"},
-                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
-                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
-                    },
-                    "required": ["query"],
+                    "properties": {},
+                    "required": [],
                 },
-                handler=self.search_vector,
+                handler=self.list_documents,
             ),
             DocumentTool(
-                name="search_bm25",
+                name="search",
                 description=(
-                    "Keyword search (BM25): returns passages ranked by keyword hits. Use when the question "
-                    "names specific terms and you want passages near those exact tokens."
+                    "Hybrid semantic search (vector + BM25, reranked): returns short snippets with "
+                    "metadata and score. Use for meaning-based clause search; a clause may be named by "
+                    "a canonical label that does not appear verbatim in the contract, so search with "
+                    "synonyms and meanings. Pass doc_ids to lock the search to specific documents."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "The search query (keywords)"},
-                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
-                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
+                        "query": {"type": "string", "description": "The semantic search query (synonyms are allowed)"},
+                        "top_k": {"type": "integer", "description": "Number of candidates to return (max 20)"},
+                        "doc_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional list of doc_ids to lock the search to specific documents (copy verbatim from tool results); omit to search the whole corpus"},
                     },
                     "required": ["query"],
                 },
-                handler=self.search_bm25,
-            ),
-            DocumentTool(
-                name="search_hybrid",
-                description=(
-                    "Hybrid search (vector + BM25, fused): balanced default when unsure which mode fits. "
-                    "Complements search_vector / search_bm25."
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query"},
-                        "top_k": {"type": "integer", "description": "Number of candidates to return"},
-                        "doc_id": {"type": "string", "description": "Lock the search to one document (its doc_id appears in search results). Use after you have identified the target document in a multi-document corpus."},
-                    },
-                    "required": ["query"],
-                },
-                handler=self.search_hybrid,
+                handler=self.search,
             ),
             DocumentTool(
                 name="get_chunk",
-                description="Reads the original text and metadata of a single chunk by its ID.",
+                description=(
+                    "Reads the full original text and metadata of a single chunk by its ID. "
+                    "Use to expand a located hit into full text."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {"chunk_id": {"type": "string", "description": "Chunk ID, e.g. doc1:3"}},
@@ -476,26 +409,16 @@ class DocumentToolkit:
                 handler=self.get_chunk,
             ),
             DocumentTool(
-                name="get_context",
-                description="Reads the chunks adjacent to a given chunk, to expand a truncated passage into a complete clause.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "chunk_id": {"type": "string"},
-                        "before": {"type": "integer", "description": "How many chunks to include before"},
-                        "after": {"type": "integer", "description": "How many chunks to include after"},
-                    },
-                    "required": ["chunk_id"],
-                },
-                handler=self.get_context,
-            ),
-            DocumentTool(
                 name="get_section",
-                description="Returns the complete continuous original text of a section (e.g. ['Article 12', '12.3']).",
+                description=(
+                    "Returns the complete continuous original text of a section "
+                    "(e.g. ['Article 12', '12.3']) with offsets and chunk ids. "
+                    "Use to capture the FULL clause after locating it via search/grep."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "doc_id": {"type": "string", "description": "Document ID (shown in search results)"},
+                        "doc_id": {"type": "string", "description": "Document ID (copy verbatim from search/grep/list_documents results)"},
                         "section_path": {"type": "array", "items": {"type": "string"}, "description": "Section path (list of heading texts)"},
                     },
                     "required": ["doc_id", "section_path"],
@@ -504,7 +427,10 @@ class DocumentToolkit:
             ),
             DocumentTool(
                 name="get_document_outline",
-                description="Returns the document outline (section paths and offsets), to locate where a clause is.",
+                description=(
+                    "Returns the document outline (section paths and offsets), to navigate clauses by "
+                    "heading before reading a full section."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {"doc_id": {"type": "string"}},
@@ -513,38 +439,24 @@ class DocumentToolkit:
                 handler=self.get_document_outline,
             ),
             DocumentTool(
-                name="get_referenced_section",
-                description="Follows a cross-reference between clauses and returns the full original text of the referenced section "
-                            '(e.g. pass "Article 14" for "except as provided in Article 14").',
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "doc_id": {"type": "string"},
-                        "ref": {"type": "string", "description": 'Reference text, e.g. "Article 14" / "Article 4.2"'},
-                    },
-                    "required": ["doc_id", "ref"],
-                },
-                handler=self.get_referenced_section,
-            ),
-            DocumentTool(
                 name="grep",
                 description=(
                     "Exact match search over the ORIGINAL clause text: returns only chunks that literally "
-                    "contain a phrase or a POSIX regular expression. Use to confirm exact wording or locate "
+                    "contain a phrase or a regular expression. Use to confirm exact wording or locate "
                     "a provision by precise terms / an article number when semantic search is too loose "
                     "(e.g. pattern='exceptions', or regex pattern='第[0-9]+条'). "
                     "mode='literal' (default) matches the plain substring; mode='regex' compiles the pattern "
-                    "as a regular expression (PostgreSQL ARE syntax; Python re is used only to count matches, "
-                    "so Python-only constructs like lookahead may still fail in the SQL query)."
+                    "with Python re (supports constructs like lookahead). Returns a short snippet around the "
+                    "first hit plus match_count per chunk."
                 ),
                 parameters={
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Literal text or POSIX regular expression to find"},
+                        "pattern": {"type": "string", "description": "Literal text or regular expression to find"},
                         "mode": {"type": "string", "enum": ["literal", "regex"], "description": "literal substring (default) or regex"},
                         "case_sensitive": {"type": "boolean", "description": "Case-sensitive matching (default false)"},
-                        "top_k": {"type": "integer", "description": "Max number of matching chunks to return"},
-                        "doc_id": {"type": "string", "description": "Lock the grep to one document (its doc_id appears in search results). Use after you have identified the target document."},
+                        "top_k": {"type": "integer", "description": "Max number of matching chunks to return (max 20)"},
+                        "doc_id": {"type": "string", "description": "Optional: lock the grep to one document (copy verbatim from tool results); omit to search the whole corpus"},
                     },
                     "required": ["pattern"],
                 },
