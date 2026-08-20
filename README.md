@@ -1,6 +1,6 @@
 <div align="center">
 
-# 📜 LexContract — 合同证据链研究系统
+# 📜 LexTrace — 合同证据链研究系统
 
 *从合同文档到"可验证"的审查结论，全链路自动化*
 
@@ -14,7 +14,7 @@
 
 ## 📖 这是什么
 
-LexContract 是一个面向合同 / 法律文档的证据链式研究系统：针对一个问题，多个研究 Agent 只负责从合同库里收集"可引用的原始条款证据"，由唯一的结论 Agent 基于证据生成带引用、可回查、不编造的审查报告。
+LexTrace 是一个面向合同 / 法律文档的证据链式研究系统：针对一个问题，多个研究 Agent 只负责从合同库里收集"可引用的原始条款证据"，由唯一的结论 Agent 基于证据生成带引用、可回查、不编造的审查报告。
 
 核心流程不是"检索 → 中间总结 → 再总结 → 最终答案"，而是 `direct` 模式下的：
 
@@ -279,4 +279,4 @@ python -m src.contract.eval.main --mode legalbenchrag --request-set configs/eval
 
 欢迎提交 Issue 与 PR。
 
-[MIT](LICENSE) © LexContract Contributors
+[MIT](LICENSE) © LexTrace Contributors

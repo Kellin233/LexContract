@@ -1,6 +1,6 @@
-# LexContract / retrieval —— 检索服务模块（BM25 + 向量 + 混合 + 重排）
+# LexTrace / retrieval —— 检索服务模块（BM25 + 向量 + 混合 + 重排）
 
-`src/retrieval/` 是 LexContract 项目的一个独立子模块，基于 `document/` 模块已入库的切片与向量，提供面向合同交叉检索的**检索服务**：
+`src/retrieval/` 是 LexTrace 项目的一个独立子模块，基于 `document/` 模块已入库的切片与向量，提供面向合同交叉检索的**检索服务**：
 
 - **BM25（稀疏/关键词）检索**：有 **pg_search (ParadeDB)** 扩展时启用，索引 `chunks.search_tokens`（jieba 分词后的空格 token 串）；扩展缺失时自动降级。
 - **向量（稠密）检索**：基于 **pgvector** 的 `chunks.embedding`（BAAI/bge-m3, 1024 维, HNSW cosine 索引）。
@@ -31,8 +31,8 @@ src/retrieval/
 
 1. **PostgreSQL + pgvector**：BM25 为可选能力，依赖 **pg_search (ParadeDB)** 扩展。标准 `pgvector/pgvector` 镜像**不含**该扩展；此时文档入库、全文/grep 和向量检索仍可用，BM25 会输出一次警告并自动降级。需要 BM25 时使用 ParadeDB 版镜像（内建 pgvector + pg_search），例如：
    ```bash
-   docker run -d --name lexcontract-paradedb \
-     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lexcontract \
+   docker run -d --name lextrace-paradedb \
+     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lextrace \
      -p 5434:5432 paradedb/paradedb:0.25.2-pg16
    ```
    然后在 `.env` 把统一的 `PG_PORT` 设置为 `5434`（与 document 模块共用同一数据库）。普通 PostgreSQL 没有 `pg_search` 时仍可使用全文和向量检索，但 BM25 会降级不可用。注意：直接从普通镜像拷贝 pg_search 的 `.so` 常因 glibc 版本不匹配而失败，建议直接用 ParadeDB 镜像。

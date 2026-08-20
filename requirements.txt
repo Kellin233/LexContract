@@ -1,5 +1,5 @@
 # =============================================================================
-# LexContract — 依赖清单（当前合同证据链链路实际需要）
+# LexTrace — 依赖清单（当前合同证据链链路实际需要）
 # 安装方式：
 #   pip install -r requirements.txt
 # 说明：src/document/requirements.txt 与 src/retrieval/requirements.txt 是子模块的

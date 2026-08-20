@@ -1,6 +1,6 @@
-# LexContract / document —— 文档解析 + 向量入库模块
+# LexTrace / document —— 文档解析 + 向量入库模块
 
-`src/document/` 是 LexContract 项目的一个独立子模块，负责合同/法律文档的**结构化解析、切片、向量化与入库**，为后续的检索、多轮分析、结论生成等模块提供统一的数据基础。
+`src/document/` 是 LexTrace 项目的一个独立子模块，负责合同/法律文档的**结构化解析、切片、向量化与入库**，为后续的检索、多轮分析、结论生成等模块提供统一的数据基础。
 
 支持输入：**TXT / PDF / DOCX**（`.doc` 亦有兜底处理）。
 
@@ -47,8 +47,8 @@ pip install -r requirements.txt
 
 1. **PostgreSQL + pgvector**：需要一个已安装 `pgvector` 扩展的 PostgreSQL 实例。例如本机用 docker 起一个：
    ```bash
-   docker run -d --name lexcontract-pg \
-     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lexcontract \
+   docker run -d --name lextrace-pg \
+     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=lextrace \
      -p 5432:5432 pgvector/pgvector:pg16
    ```
    如使用其他宿主机端口，必须在项目 `.env` 中显式设置统一的 `PG_PORT`。

@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lexcontract"
+name = "lextrace"
 version = "0.1.0"
 description = "合同证据链研究系统：从合同文档到可验证的审查结论"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "LexContract Contributors"},
+    {name = "LexTrace Contributors"},
 ]
 keywords = ["contract", "legal", "evidence", "rag", "multi-agent", "llm"]
 classifiers = [
@@ -50,8 +50,8 @@ dev = [
 
 [project.scripts]
 # 命令行快捷入口（主流程按 README 用 python scripts/run_single.py 运行）
-lexcontract-eval = "src.contract.eval.main:main"
-lexcontract-ablation = "src.contract.eval.ablation:main"
+lextrace-eval = "src.contract.eval.main:main"
+lextrace-ablation = "src.contract.eval.ablation:main"
 
 [tool.setuptools.packages.find]
 include = ["src", "src.*"]

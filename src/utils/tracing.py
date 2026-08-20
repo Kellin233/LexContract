@@ -1,7 +1,7 @@
 """
 LangSmith 追踪集成模块
 
-为 DeepResearch Agent 提供可观测性支持，无需引入 LangChain/LangGraph 依赖。
+为 LexTrace 提供可观测性支持，无需引入 LangChain/LangGraph 依赖。
 核心能力：
   1. LLM 调用自动追踪（通过 wrap_openai 包装 VLLMPolicy 的 client）
   2. Agent 流程手动埋点（通过 @traceable 装饰关键方法）

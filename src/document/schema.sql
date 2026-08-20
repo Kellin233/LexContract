@@ -1,4 +1,4 @@
--- LexContract / document 模块：PostgreSQL + pgvector 表结构
+-- LexTrace / document 模块：PostgreSQL + pgvector 表结构
 -- 先启用扩展（需数据库已安装 pgvector 插件）
 CREATE EXTENSION IF NOT EXISTS vector;
 

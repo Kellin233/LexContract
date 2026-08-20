@@ -1,5 +1,5 @@
 """
-LexContract — 合同证据链编排器（改造自 deep-research M1 Orchestrator）
+LexTrace — 合同证据链编排器
 
 状态机流程：
   IDLE → PLANNING(Planner.initial_plan)

@@ -1,4 +1,4 @@
-"""LexContract retrieval 模块配置：从环境变量/.env 读取（复用 document 的 PG/EMBED 配置键）。"""
+"""LexTrace retrieval 模块配置：从环境变量/.env 读取（复用 document 的 PG/EMBED 配置键）。"""
 from __future__ import annotations
 
 import os
@@ -10,14 +10,14 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # 加载当前模块目录或项目根目录下的 .env；.env.local 优先级更高
 load_dotenv(BASE_DIR / ".env")
-load_dotenv(BASE_DIR.parent.parent / ".env")  # src/retrieval -> src -> LexContract 根
+load_dotenv(BASE_DIR.parent.parent / ".env")  # src/retrieval -> src -> LexTrace 根
 load_dotenv(BASE_DIR / ".env.local", override=True)
 load_dotenv(BASE_DIR.parent.parent / ".env.local", override=True)
 
 # --- PostgreSQL（与 document 模块一致）---
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_PORT = int(os.getenv("PG_PORT", "5432"))
-PG_DB = os.getenv("PG_DB", "lexcontract")
+PG_DB = os.getenv("PG_DB", "lextrace")
 PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
 

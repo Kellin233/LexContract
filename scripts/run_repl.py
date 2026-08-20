@@ -3,7 +3,7 @@
 """
 scripts/run_repl.py
 ================================================================================
-LexContract 合同证据链交互式 REPL 单会话脚本。
+LexTrace 合同证据链交互式 REPL 单会话脚本。
 
 功能：
   1. 在单个进程内连续提问，共享同一个 Orchestrator
@@ -44,7 +44,7 @@ def print_help() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LexContract 合同证据链交互式 REPL",
+        description="LexTrace 合同证据链交互式 REPL",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--config", type=str, default=None, help="配置文件路径")
@@ -65,7 +65,7 @@ def main() -> None:
         print(f"[REPL] 已指定 session: {session_id}")
     else:
         print("=" * 50)
-        print("DeepResearch Agent 交互式 REPL")
+        print("LexTrace 交互式 REPL")
         print("=" * 50)
         session_id = f"sess_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

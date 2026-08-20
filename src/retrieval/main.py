@@ -1,4 +1,4 @@
-"""LexContract retrieval 模块 CLI。
+"""LexTrace retrieval 模块 CLI。
 
 用法：
     python3 -m src.retrieval.main init-db                       # 加列；有扩展时建 BM25 索引
@@ -114,7 +114,7 @@ def cmd_query(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="retrieval", description="LexContract 检索服务（BM25/向量/混合）")
+    p = argparse.ArgumentParser(prog="retrieval", description="LexTrace 检索服务（BM25/向量/混合）")
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("init-db", help="初始化 session_id/search_tokens 列；有 pg_search 时建立 BM25 索引")

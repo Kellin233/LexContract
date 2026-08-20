@@ -3,7 +3,7 @@
 """
 scripts/run_single.py
 ================================================================================
-LexContract 合同证据链：单条问题运行脚本。
+LexTrace 合同证据链：单条问题运行脚本。
 
 Usage:
     python scripts/run_single.py --query "供应商能否单方面终止合同？" --session S1 [--doc doc_a,doc_b] [--config path]
@@ -27,7 +27,7 @@ from src.core.runner import initialize_modules, load_config, run_research, save_
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LexContract 合同证据链：单条问题运行",
+        description="LexTrace 合同证据链：单条问题运行",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:

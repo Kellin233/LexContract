@@ -1,6 +1,6 @@
 """PostgreSQL-backed vector, BM25 (pg_search) and hybrid (加权 RRF) 检索。
 
-对齐 PAKTON-develop 的 PostgresRetriever 设计，落到 LexContract 原生 psycopg + pgvector 栈。
+对齐 PAKTON-develop 的 PostgresRetriever 设计，落到 LexTrace 原生 psycopg + pgvector 栈。
 查询向量化复用 document.embedder（BAAI/bge-m3）。
 """
 from __future__ import annotations

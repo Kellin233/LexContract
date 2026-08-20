@@ -1,4 +1,4 @@
-"""LexContract document 模块配置：从环境变量/.env 读取。"""
+"""LexTrace document 模块配置：从环境变量/.env 读取。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent.parent  # src/document -> src -> LexContract 根
+PROJECT_ROOT = BASE_DIR.parent.parent  # src/document -> src -> LexTrace 根
 
 # 加载当前模块目录或项目根目录下的 .env；.env.local 优先级更高
 load_dotenv(BASE_DIR / ".env")
@@ -18,7 +18,7 @@ load_dotenv(PROJECT_ROOT / ".env.local", override=True)
 # --- PostgreSQL ---
 PG_HOST = os.getenv("PG_HOST", "localhost")
 PG_PORT = int(os.getenv("PG_PORT", "5432"))
-PG_DB = os.getenv("PG_DB", "lexcontract")
+PG_DB = os.getenv("PG_DB", "lextrace")
 PG_USER = os.getenv("PG_USER", "postgres")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "postgres")
 

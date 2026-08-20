@@ -3,7 +3,7 @@
 """
 src/core/runner.py
 ================================================================================
-LexContract 合同证据链执行入口（改造自 DeepResearch Agent runner）。
+LexTrace 合同证据链执行入口。
 
 对外接口:
     - load_config(config_path) -> dict

@@ -41,7 +41,7 @@ __all__ = ["main"]
 # 参数
 # ---------------------------------------------------------------------------
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="LexContract 评测 CLI")
+    p = argparse.ArgumentParser(description="LexTrace 评测 CLI")
     p.add_argument("--mode", required=True, choices=["legalbenchrag", "contractnli"],
                    help="评测模式")
     p.add_argument("--legalbench-root", default=None,

@@ -1,4 +1,4 @@
-"""LexContract document 模块 CLI。
+"""LexTrace document 模块 CLI。
 
 用法：
     python main.py init-db                         # 初始化 PostgreSQL(pgvector) 表结构

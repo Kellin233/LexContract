@@ -1,4 +1,4 @@
--- LexContract / retrieval 模块：在 document 模块已有结构上做增量演进
+-- LexTrace / retrieval 模块：在 document 模块已有结构上做增量演进
 -- pg_search (ParadeDB) 为可选扩展；普通 PostgreSQL 仍可使用 session_id、全文和向量检索。
 -- vector 扩展与 HNSW 索引已由 document 模块建好。
 -- 语句全部幂等（IF NOT EXISTS），可安全重复执行。
