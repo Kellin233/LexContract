@@ -300,7 +300,7 @@ class DocumentToolkit:
             ]
 
     def get_page_for_span(self, doc_id: str, start: int, end: int) -> int:
-        """返回覆盖 [start, end] 区间切片的起始页码（找不到则 0）。"""
+        """返回与 [start, end) 相交的最早切片页码（找不到则 0）。"""
         self._assert_scope(doc_id)
         from src.retrieval.store import connect
 
@@ -310,8 +310,8 @@ class DocumentToolkit:
                 SELECT c.page_no FROM chunks c
                 JOIN documents d ON d.doc_id = c.doc_id
                 WHERE c.doc_id = %s AND d.session_id = %s
-                  AND c.charspan[1] <= %s AND c.charspan[2] >= %s
-                ORDER BY charspan[1] LIMIT 1
+                  AND c.charspan[2] > %s AND c.charspan[1] < %s
+                ORDER BY c.charspan[1], c.chunk_index LIMIT 1
                 """,
                 (doc_id, self.session_id, start, end),
             )

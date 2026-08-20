@@ -3,7 +3,7 @@
 校验点：
 1. quote 是否与 DB full_text[start:end] 完全一致；
 2. 区间是否落在合法字符范围内；
-3. source_chunk_ids 是否都属于该文档，且其 charspan 并集覆盖 [start, end]。
+3. source_chunk_ids 是否都属于该文档/章节，且 chunk 正文与 charspan 对齐、并集覆盖 [start, end]。
 只回答“证据确实来自原始文档”，不做任何事实判断。
 
 第 3 点用“覆盖率”判定而不是旧版的“内部零空洞”：chunk 切分偶尔在边界留 1 字符
@@ -50,20 +50,29 @@ class CitationVerifier:
 
         # 2) 切片归属与区间覆盖：先裁到 [s,e]，再并集求覆盖率
         clipped: list[tuple[int, int]] = []
+        expected_path = list(evidence.section_path or [])
         for cid in evidence.source_chunk_ids:
             chunk = self.toolkit.get_chunk(str(cid))
             if not chunk:
                 return False, f"missing-chunk {cid}"
             if chunk.get("doc_id") != evidence.document_id:
                 return False, f"off-doc-chunk {cid}"
+            if list(chunk.get("section_path") or []) != expected_path:
+                return False, "off-section-chunk"
             cs = chunk.get("charspan") or []
-            if len(cs) == 2:
-                try:
-                    lo, hi = max(int(cs[0]), s), min(int(cs[1]), e)
-                except (TypeError, ValueError):
-                    continue
-                if hi > lo:
-                    clipped.append((lo, hi))
+            if len(cs) != 2:
+                return False, "invalid-chunk-span"
+            try:
+                raw_lo, raw_hi = int(cs[0]), int(cs[1])
+            except (TypeError, ValueError):
+                return False, "invalid-chunk-span"
+            if not (0 <= raw_lo < raw_hi <= len(full)):
+                return False, "invalid-chunk-span"
+            if not isinstance(chunk.get("text"), str) or full[raw_lo:raw_hi] != chunk["text"]:
+                return False, "chunk-text-mismatch"
+            lo, hi = max(raw_lo, s), min(raw_hi, e)
+            if hi > lo:
+                clipped.append((lo, hi))
         if not clipped:
             return False, "chunks-no-overlap"
 

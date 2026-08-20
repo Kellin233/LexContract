@@ -66,14 +66,9 @@ def list_sessions() -> list[str]:
 
 
 def iter_sections(tk: DocumentToolkit):
-    """遍历会话内所有已入库文档的章节（稀疏校验 start_offset 非 0 的去重）。"""
-    from src.retrieval.store import connect
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT doc_id FROM documents WHERE session_id <> '' AND full_text <> '' ORDER BY doc_id"
-        )
-        doc_ids = [r[0] for r in cur.fetchall()]
-    for did in doc_ids:
+    """遍历当前 session 内所有已入库文档的章节。"""
+    for doc in tk.list_documents():
+        did = doc["doc_id"]
         for row in tk.get_document_outline(did):
             if row.get("start_offset"):
                 yield {"doc_id": did, **row}
@@ -252,7 +247,7 @@ def tier_b(tk: DocumentToolkit) -> None:
 
     pool = AgentPool(policy_factory=lambda: planner_policy, worker_factory=_make_worker, max_idle=3)
     orch = Orchestrator(planner=planner, agent_pool=pool, reviewer=reviewer, refiner=refiner,
-                        evidence_store=store_pool, compressor=None, memory_store=None)
+                        evidence_store=store_pool, compressor=None)
 
     config = RunConfig(
         max_concurrent=2,
@@ -312,10 +307,21 @@ def main() -> int:
     if not sessions:
         print("SKIP：没有已分配会话的文档（先 parse + assign session）")
         return 0
-    tk = DocumentToolkit(session_id=sessions[0])
     global _CANDIDATES
-    _CANDIDATES = prepare_candidates(tk)
-    if not _CANDIDATES:
+    tk = None
+    _CANDIDATES = []
+    for session_id in sessions:
+        candidate_tk = DocumentToolkit(session_id=session_id)
+        try:
+            candidate_list = prepare_candidates(candidate_tk)
+        except Exception as exc:  # noqa: BLE001
+            print(f"SKIP：读取数据库章节时连接中断（{type(exc).__name__}）")
+            return 0
+        if candidate_list:
+            tk = candidate_tk
+            _CANDIDATES = candidate_list
+            break
+    if tk is None:
         print("SKIP：会话内没有可用章节（先 migrate 保证 full_text）")
         return 0
 

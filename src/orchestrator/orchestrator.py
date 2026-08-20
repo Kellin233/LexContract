@@ -49,8 +49,6 @@ from ..contract.refiner import Refiner
 from ..utils.tokens import enter_token_ledger, exit_token_ledger
 from ..utils.tracing import trace_chain
 
-SharedMemoryStore = Any  # M4（可选保留，仅落最终报告）
-
 
 __all__ = ["Orchestrator"]
 
@@ -64,7 +62,6 @@ class Orchestrator:
         reviewer / refiner: 完整性与结论模块。
         evidence_store: 运行期证据库（每次 run 重置）。
         compressor: 可选，仅用于压缩规划/审查历史，绝不压缩 Evidence。
-        memory_store: 可选 M4，仅用于持久化最终报告。
     """
 
     def __init__(
@@ -75,14 +72,12 @@ class Orchestrator:
         refiner: Refiner | None = None,
         evidence_store: EvidenceStore | None = None,
         compressor: Any | None = None,
-        memory_store: Any | None = None,
     ) -> None:
         self.planner = planner
         self.agent_pool = agent_pool
         self.reviewer = reviewer
         self.refiner = refiner
         self.compressor = compressor
-        self.memory_store = memory_store
 
         # 运行期状态
         self._runtime: dict[str, Any] = {}
@@ -189,11 +184,6 @@ class Orchestrator:
             report.num_searches = self._num_searches
             report.num_replan = max(0, (self._research_state.iteration if self._research_state else 1) - 1)
             report.telemetry = self.last_run_telemetry(report)
-            if self.memory_store is not None:
-                try:
-                    self._store_final_to_memory(report)
-                except Exception as e:  # noqa: BLE001
-                    print(f"[M4] Failed to store final report: {e}")
             return report
 
         failed_report = ResearchReport(query=query, content="Research failed due to persistent errors or global timeout.")
@@ -520,19 +510,3 @@ class Orchestrator:
 
     def _is_global_timeout(self) -> bool:
         return time.monotonic() - self._start_time > self._config.global_timeout_seconds
-
-    def _store_final_to_memory(self, report: ResearchReport) -> None:
-        from src.memory.long_term import MemoryEntry
-
-        entry = MemoryEntry(
-            entry_id=f"final_report:{int(time.time())}",
-            claim=str(report.content)[:800],
-            source="orchestrator",
-            confidence=report.confidence,
-            agent_id="orchestrator",
-            timestamp=time.time(),
-            evidence_type="primary",
-            embedding=[],
-            topic=self._query[:50],
-        )
-        self.memory_store.put(entry)

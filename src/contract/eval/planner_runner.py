@@ -20,7 +20,7 @@ import copy
 import json
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .adapter import ContractNLIAdapter
@@ -79,19 +79,27 @@ def run_contractnli_fullchain(
         return _run_single_instance(rec, base, run_config, nli_session=nli_session, output_dir=output_dir,
                                     max_rounds=max_rounds, max_per_round=max_per_round, dedup=dedup)
 
-    if int(concurrency) > 1:
-        with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
-            out_records = list(ex.map(_run_one, jobs))
-    else:
-        out_records = [_run_one(j) for j in jobs]
-
+    evaluated = 0
     errors = 0
-    for record in out_records:
+
+    def _persist(record: NliRecord) -> None:
+        """任务完成后立即落盘，支持中断后的断点续跑。"""
+        nonlocal evaluated, errors
         if not record.pred_valid:
             errors += 1
         append_record(records_path, record.model_dump(mode="json"))
+        evaluated += 1
 
-    return {"evaluated": len(out_records), "skipped_done": skipped, "errors": errors}
+    if int(concurrency) > 1:
+        with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
+            futures = [ex.submit(_run_one, job) for job in jobs]
+            for future in as_completed(futures):
+                _persist(future.result())
+    else:
+        for job in jobs:
+            _persist(_run_one(job))
+
+    return {"evaluated": evaluated, "skipped_done": skipped, "errors": errors}
 
 
 def _build_nli_base(modules: dict, config: dict) -> dict:
@@ -156,7 +164,6 @@ def _build_instance_modules(base: dict, config: dict, nli_session: str,
         refiner=base.get("refiner"),
         evidence_store=estore,
         compressor=None,
-        memory_store=base.get("memory_store"),
     )
     return m
 

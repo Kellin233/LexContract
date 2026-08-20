@@ -27,7 +27,12 @@ class EvidenceAssembler:
 
     def materialize(self, cand: dict, question_id: str) -> Optional[Evidence]:
         """把一个候选（source_chunk_ids + relevance_note）物化为 Evidence；无法定位时返回 None。"""
-        chunk_ids = [str(c).strip() for c in (cand.get("source_chunk_ids") or []) if str(c).strip()]
+        raw_chunk_ids = cand.get("source_chunk_ids")
+        if not isinstance(raw_chunk_ids, list):
+            return None
+        chunk_ids = list(dict.fromkeys(
+            str(c).strip() for c in raw_chunk_ids if str(c).strip()
+        ))
         if not chunk_ids:
             return None
 
@@ -48,6 +53,10 @@ class EvidenceAssembler:
         if not full:
             return None
 
+        # 候选切片的区间必须各自合法，不允许倒置或越界区间被并集掩盖。
+        if any(self._chunk_span(c, len(full)) is None for c in chunks):
+            return None
+
         # 章节一致性：所有切片 section_path 必须完全相等（含全空）
         paths = [list(c.get("section_path") or []) for c in chunks]
         if any(p != paths[0] for p in paths[1:]):
@@ -57,13 +66,15 @@ class EvidenceAssembler:
         # 整章聚合优先
         if section_path:
             sec = self.toolkit.get_section(doc_id, section_path)
-            if (
-                sec is not None
-                and estimate_tokens(str(sec.get("text") or "")) <= _retrieval_config.MAX_EVIDENCE_SECTION_TOKENS
-            ):
-                start = int(sec.get("start_offset") or 0)
-                end = int(sec.get("end_offset") or 0)
-                evidence_chunk_ids = [str(x) for x in (sec.get("chunk_ids") or [])]
+            if sec is not None:
+                validated = self._validate_section(sec, doc_id, section_path, full)
+                if validated is None:
+                    return None
+                start, end, section_text, section_chunk_ids = validated
+            else:
+                section_text, section_chunk_ids = "", []
+            if sec is not None and estimate_tokens(section_text) <= _retrieval_config.MAX_EVIDENCE_SECTION_TOKENS:
+                evidence_chunk_ids = section_chunk_ids
             else:
                 fb = self._fallback_span(chunks)
                 if fb is None:
@@ -97,6 +108,48 @@ class EvidenceAssembler:
             relevance_note=str(cand.get("relevance_note") or "")[:500],
         )
 
+    @staticmethod
+    def _chunk_span(chunk: dict, full_length: int) -> Optional[tuple[int, int]]:
+        cs = chunk.get("charspan") or []
+        if len(cs) != 2:
+            return None
+        try:
+            lo, hi = int(cs[0]), int(cs[1])
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= lo < hi <= full_length):
+            return None
+        return lo, hi
+
+    @staticmethod
+    def _validate_section(
+        sec: dict,
+        doc_id: str,
+        section_path: list[str],
+        full: str,
+    ) -> Optional[tuple[int, int, str, list[str]]]:
+        """校验 get_section 的内部返回，防止错文档/错章节数据进入 Evidence。"""
+        if str(sec.get("doc_id") or "").strip() != doc_id:
+            return None
+        if list(sec.get("section_path") or []) != section_path:
+            return None
+        chunk_ids = list(dict.fromkeys(
+            str(x).strip() for x in (sec.get("chunk_ids") or []) if str(x).strip()
+        ))
+        if not chunk_ids:
+            return None
+        try:
+            start = int(sec.get("start_offset"))
+            end = int(sec.get("end_offset"))
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= start < end <= len(full)):
+            return None
+        text = sec.get("text")
+        if not isinstance(text, str) or text != full[start:end]:
+            return None
+        return start, end, text, chunk_ids
+
     def _fallback_span(self, chunks: list[dict]) -> Optional[tuple[int, int]]:
         """回退路径：命中切片按 charspan[0] 排序，零空洞连续性校验后取并集区间。"""
         spans: list[tuple[int, int]] = []
@@ -105,9 +158,12 @@ class EvidenceAssembler:
             if len(cs) != 2:
                 return None
             try:
-                spans.append((int(cs[0]), int(cs[1])))
+                lo, hi = int(cs[0]), int(cs[1])
             except (TypeError, ValueError):
                 return None
+            if lo < 0 or hi <= lo:
+                return None
+            spans.append((lo, hi))
         spans.sort()
         for (prev_lo, prev_hi), (lo, hi) in zip(spans, spans[1:]):
             if prev_hi < lo:  # 空洞

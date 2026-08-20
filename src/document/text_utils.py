@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 
 # 中文/英文通用句子切分：按句号、问号、感叹号、分号、换行切分。
-# 保留结尾标点；用负向断言避免把小数点/缩写误切。
+# 保留结尾标点和其后空白，使切分区间能连续覆盖原文。
 _SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?；;\n])\s*")
 
 # token 估算口径统一在 src/utils/tokens.py，这里转发保持下游（chunker/评测）兼容
@@ -30,53 +30,76 @@ def search_text(title: str, section_path: list[str], body: str, *, max_path_char
 
 
 def split_sentences(text: str) -> list[str]:
-    """按句子边界切分，返回非空句子列表。"""
-    parts = [p.strip() for p in _SENT_SPLIT_RE.split(text)]
-    return [p for p in parts if p]
+    """按句子边界切分，保留原文中的空格、换行和标点。"""
+    return [text[start:end] for start, end in sentence_spans(text)]
 
 
-def _hard_split(text: str, max_tokens: int) -> list[str]:
-    """对仍超 token 上限的文本按字符做有界切分兜底。
+def sentence_spans(text: str) -> list[tuple[int, int]]:
+    """返回句子在原文中的相对区间，区间连续覆盖全文。"""
+    if not text:
+        return []
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for match in _SENT_SPLIT_RE.finditer(text):
+        end = match.end()
+        if end > start:
+            spans.append((start, end))
+            start = end
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def _hard_split_spans(text: str, start: int, end: int, max_tokens: int) -> list[tuple[int, int]]:
+    """对仍超 token 上限的区间按字符做有界切分兜底。
 
     用于无标点、无法按句子下切的超长串：逐字符扩展前缀直到估算 token 越过
     上限，保证每片有界且至少 1 个字符（避免死循环）。
     """
-    pieces: list[str] = []
-    start = 0
-    n = len(text)
-    while start < n:
-        end = start + 1
-        while end < n and estimate_tokens(text[start : end + 1]) <= max_tokens:
-            end += 1
-        pieces.append(text[start:end])
-        start = end
+    pieces: list[tuple[int, int]] = []
+    cursor = start
+    while cursor < end:
+        low, high = cursor + 1, end
+        best = cursor + 1
+        while low <= high:
+            mid = (low + high) // 2
+            if estimate_tokens(text[cursor:mid]) <= max_tokens:
+                best = mid
+                low = mid + 1
+            else:
+                high = mid - 1
+        pieces.append((cursor, best))
+        cursor = best
     return pieces
 
 
-def truncate_sentences(text: str, max_tokens: int) -> list[str]:
-    """把超长文本按句子切分，并在 token 上限内尽量合并句子成组。
+def truncate_sentence_spans(text: str, max_tokens: int) -> list[tuple[int, int]]:
+    """把超长文本按句子切分，返回原文相对区间。
 
     用于“结构优先后仍过长时，按句子为边界二次切分”。
-    对切分后仍超限的分组（无标点长串等）再做有界字符兜底，保证每片较小。
+    切分结果保留原文中的所有字符，对无标点长串再按字符下切。
     """
-    sentences = split_sentences(text)
-    groups: list[str] = []
-    current: list[str] = []
-    current_tok = 0
-    for sent in sentences:
-        st = estimate_tokens(sent)
-        if current and current_tok + st > max_tokens:
-            groups.append("".join(current))
-            current, current_tok = [], 0
-        current.append(sent)
-        current_tok += st
-    if current:
-        groups.append("".join(current))
-    # 硬上限兜底：任何分组仍超限则按字符进一步下切
-    bounded: list[str] = []
-    for group in groups:
-        if estimate_tokens(group) <= max_tokens:
-            bounded.append(group)
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    sentences = sentence_spans(text)
+    if not sentences:
+        return []
+
+    groups: list[tuple[int, int]] = []
+    group_start = sentences[0][0]
+    for sent_start, sent_end in sentences:
+        if estimate_tokens(text[group_start:sent_end]) <= max_tokens:
+            continue
+        if sent_start > group_start:
+            groups.append((group_start, sent_start))
+            group_start = sent_start
+        if estimate_tokens(text[group_start:sent_end]) > max_tokens:
+            groups.extend(_hard_split_spans(text, group_start, sent_end, max_tokens))
+            group_start = sent_end
+
+    if group_start < len(text):
+        if estimate_tokens(text[group_start:]) <= max_tokens:
+            groups.append((group_start, len(text)))
         else:
-            bounded.extend(_hard_split(group, max_tokens))
-    return bounded
+            groups.extend(_hard_split_spans(text, group_start, len(text), max_tokens))
+    return groups

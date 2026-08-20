@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections import Counter
 from typing import Any
@@ -26,6 +27,8 @@ from ..utils.tracing import trace_agent
 
 
 __all__ = ["Searcher"]
+
+logger = logging.getLogger(__name__)
 
 # 总工具轮次上限：给"发检索词"、"展开原文"、"输出最终 JSON"都留轮次
 MAX_TURNS = 5
@@ -400,22 +403,49 @@ class Searcher(BaseAgent):
         materialize_failed = 0
         verifier_rejected = 0
         verified_count = 0
-        for cand in candidates:
+        for candidate_index, cand in enumerate(candidates):
             if not isinstance(cand, dict):
                 drop_reasons["materialize-fail"] += 1
                 materialize_failed += 1
                 continue
-            ev = self.assembler.materialize(cand, question_id)
+            try:
+                ev = self.assembler.materialize(cand, question_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Searcher/%s] candidate %d materialize exception: %s",
+                    question_id, candidate_index, type(exc).__name__,
+                )
+                drop_reasons["materialize-exception"] += 1
+                materialize_failed += 1
+                continue
             if ev is None:
                 drop_reasons["materialize-fail"] += 1
                 materialize_failed += 1
                 continue
-            if not self.verifier.verify(ev):
+            try:
+                verified = self.verifier.verify(ev)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Searcher/%s] candidate %d verify exception: %s",
+                    question_id, candidate_index, type(exc).__name__,
+                )
+                drop_reasons["verify-exception"] += 1
+                verifier_rejected += 1
+                continue
+            if not verified:
                 drop_reasons[ev.verify_note or "verify-fail"] += 1
                 verifier_rejected += 1
                 continue  # 原文校验失败，丢弃
             verified_count += 1
-            registered, _ = store.register(ev, question_id)
+            try:
+                registered, _ = store.register(ev, question_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Searcher/%s] candidate %d register exception: %s",
+                    question_id, candidate_index, type(exc).__name__,
+                )
+                drop_reasons["register-exception"] += 1
+                continue
             result.evidences.append(registered)
         result.drop_reasons = dict(drop_reasons)
         result.materialize_failed_count = materialize_failed

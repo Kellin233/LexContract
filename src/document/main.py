@@ -114,8 +114,64 @@ def _backfill_full_text_from_json(conn) -> int:
     return restored
 
 
+def _repair_legacy_charspans(conn) -> int:
+    """修复可证明是单个前导换行错位的旧切片区间。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE chunks c
+            SET charspan = ARRAY[c.charspan[1] + 1, c.charspan[2]],
+                metadata = jsonb_set(
+                    COALESCE(c.metadata, '{}'::jsonb),
+                    '{charspan}',
+                    to_jsonb(ARRAY[c.charspan[1] + 1, c.charspan[2]]::int[]),
+                    true
+                )
+            FROM documents d
+            WHERE d.doc_id = c.doc_id
+              AND array_length(c.charspan, 1) = 2
+              AND c.charspan[1] >= 0
+              AND c.charspan[2] > c.charspan[1]
+              AND c.charspan[2] <= char_length(d.full_text)
+              AND c.charspan[2] - c.charspan[1] = char_length(c.text) + 1
+              AND substring(d.full_text FROM c.charspan[1] + 1 FOR 1) = E'\\n'
+              AND substring(d.full_text FROM c.charspan[1] + 2 FOR char_length(c.text)) = c.text
+            RETURNING c.id
+            """
+        )
+        repaired = len(cur.fetchall())
+    conn.commit()
+    return repaired
+
+
+def _find_unresolved_chunk_alignment(conn, sample_limit: int = 20) -> tuple[int, list[str]]:
+    """扫描切片正文与全文区间，返回异常总数及有限样本 ID。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT doc_id, full_text FROM documents")
+        full_texts = {row[0]: row[1] or "" for row in cur.fetchall()}
+        cur.execute("SELECT id, doc_id, text, charspan FROM chunks ORDER BY id")
+        unresolved = 0
+        samples: list[str] = []
+        for chunk_id, doc_id, text, charspan in cur.fetchall():
+            full = full_texts.get(doc_id, "")
+            try:
+                start, end = int(charspan[0]), int(charspan[1])
+            except (TypeError, ValueError, IndexError):
+                start, end = -1, -1
+            aligned = (
+                0 <= start < end <= len(full)
+                and isinstance(text, str)
+                and full[start:end] == text
+            )
+            if not aligned:
+                unresolved += 1
+                if len(samples) < sample_limit:
+                    samples.append(str(chunk_id))
+    return unresolved, samples
+
+
 def cmd_migrate(_args) -> int:
-    """把既有库迁移到证据链阶段：加 full_text 列、恢复全文、回填 BM25 tokens。"""
+    """把既有库迁移到证据链阶段，并安全修复旧切片区间。"""
     from .postgres_store import connect, init_db
 
     try:
@@ -128,7 +184,14 @@ def cmd_migrate(_args) -> int:
     retrieval_ok = _ensure_retrieval_schema()
     with connect() as conn:
         restored = _backfill_full_text_from_json(conn)
-    print(f"数据库迁移完成：full_text 恢复 {restored} 篇。")
+        repaired = _repair_legacy_charspans(conn)
+        unresolved, samples = _find_unresolved_chunk_alignment(conn)
+    print(f"数据库迁移完成：full_text 恢复 {restored} 篇，安全修复区间 {repaired} 个。")
+    if unresolved:
+        print(
+            f"[warn] 仍有 {unresolved} 个切片的正文与 charspan 不一致，请重新解析原始文件。示例: {', '.join(samples)}",
+            file=sys.stderr,
+        )
 
     if retrieval_ok:
         n = _backfill_search_tokens(None)

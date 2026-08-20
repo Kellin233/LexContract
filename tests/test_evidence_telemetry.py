@@ -5,6 +5,8 @@ import asyncio
 import json
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -12,6 +14,8 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.contract.eval.metrics import evidence_hit_rate
+from src.contract.eval.schemas import NliRecord
+from src.contract.eval import planner_runner
 from src.contract.refiner import Refiner
 from src.contract.schemas import (
     Evidence,
@@ -193,6 +197,58 @@ def test_old_contractnli_records_still_summarize():
     assert summary["accuracy"] == 1.0
     assert summary["citation_validity_rate"] == 0.0
     assert summary["reviewer_sufficient_rate"] is None
+
+
+def test_contractnli_persists_each_completed_task(monkeypatch, tmp_path):
+    """并发任务完成后立即写入，不能等所有 Future 都结束。"""
+    slow_started = threading.Event()
+    fast_allowed = threading.Event()
+    slow_done = threading.Event()
+    persisted_ids = []
+    persisted_before_slow_done = []
+
+    def fake_build_base(_modules, _config):
+        return {}
+
+    def fake_run_one(rec, *_args, **_kwargs):
+        instance_id = str(rec["instance_id"])
+        if instance_id == "slow":
+            slow_started.set()
+            assert fast_allowed.wait(timeout=1)
+            time.sleep(0.05)
+            slow_done.set()
+        else:
+            assert slow_started.wait(timeout=1)
+            fast_allowed.set()
+        return NliRecord(
+            instance_id=instance_id,
+            hypothesis="h",
+            gold_label="entailment",
+            pred_label="entailment",
+            pred_valid=True,
+        )
+
+    def fake_append(_path, record):
+        instance_id = str(record["instance_id"])
+        persisted_ids.append(instance_id)
+        if instance_id == "fast":
+            persisted_before_slow_done.append(not slow_done.is_set())
+
+    monkeypatch.setattr(planner_runner, "_build_nli_base", fake_build_base)
+    monkeypatch.setattr(planner_runner, "_run_single_instance", fake_run_one)
+    monkeypatch.setattr(planner_runner, "append_record", fake_append)
+
+    stats = planner_runner.run_contractnli_fullchain(
+        [{"instance_id": "slow"}, {"instance_id": "fast"}],
+        modules={},
+        config={"contract": {}},
+        records_path=tmp_path / "records.jsonl",
+        concurrency=2,
+    )
+
+    assert stats == {"evaluated": 2, "skipped_done": 0, "errors": 0}
+    assert persisted_ids == ["fast", "slow"]
+    assert persisted_before_slow_done == [True]
 
 
 class _Reviewer:

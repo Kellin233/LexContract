@@ -155,7 +155,8 @@ def _assemble_full_text(blocks: list[ParsedBlock]) -> str:
         # 用换行分隔块，保证偏移可回溯
         sep = "\n" if parts else ""
         text = blk.text if not sep else "\n" + blk.text
-        start = offset
+        # 块区间只覆盖块正文；块间分隔换行仍保留在 full_text 中。
+        start = offset + len(sep)
         offset += len(text)
         blk.offset = [start, offset]
         parts.append(text)

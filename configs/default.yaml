@@ -143,21 +143,6 @@ compressor:
   # 是否启用多级压缩（L1-L3）
   enable_multilevel: true
 
-memory:
-  # M4: Shared Memory Store 配置
-  # SQLite 数据库文件路径
-  db_path: "data/memory.db"
-  # 内存表中最大条目数，超过则触发淘汰
-  max_entries: 10000
-  # 去重相似度阈值：高于此值视为重复记忆，不重复写入
-  similarity_threshold_dup: 0.92
-  # 冲突检测阈值：高于此值但内容矛盾时触发冲突消解
-  similarity_threshold_conflict: 0.65
-  # 每写入多少条后执行一次自动淘汰（LRU）
-  evict_interval: 100
-  # 是否启用向量化索引（加速相似度检索）
-  enable_vector_index: true
-
 evolution:
   # M6: Self-Evolution Engine 配置
   # 总开关：是否启用在线自进化训练

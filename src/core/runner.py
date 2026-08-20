@@ -160,15 +160,6 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
     )
     modules["agent_pool"] = agent_pool
 
-    # 可选 M4 持久化（仅落最终报告）
-    from src.memory.memory_store import SharedMemoryStore
-    memory_cfg = config.get("memory", {})
-    memory_store = SharedMemoryStore(
-        db_path=memory_cfg.get("db_path", "data/memory.db"),
-        session_id=session_id,
-    )
-    modules["memory_store"] = memory_store
-
     orchestrator = Orchestrator(
         planner=planner,
         agent_pool=agent_pool,
@@ -176,7 +167,6 @@ def initialize_modules(config: dict, session_id: str = "") -> dict[str, Any]:
         refiner=refiner,
         evidence_store=modules["evidence_store"],
         compressor=None,
-        memory_store=memory_store,
     )
     modules["orchestrator"] = orchestrator
 
