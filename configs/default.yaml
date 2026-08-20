@@ -212,6 +212,9 @@ contract:
   # ---------------------------------------------------------------------------
   # 最大研究轮数（Planner→Worker→Reviewer 一圈为 1），达上限以 PARTIALLY_SUFFICIENT 收尾
   max_iterations: 3
+  # 编排模式：reviewed_incremental=Planner→Searcher→Reviewer→增量补查→Refiner；
+  # direct=Planner→Searcher→Refiner（用于 ContractNLI 编排消融）
+  orchestration_mode: "reviewed_incremental"
   # 最多同时执行的 EvidenceWorker 数（一次最多分配 3 个 worker）
   max_concurrent: 3
   # 全局超时（秒），到点强制进入 Refiner

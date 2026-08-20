@@ -5,12 +5,14 @@ LexContract — 合同证据链编排器（改造自 deep-research M1 Orchestrat
   IDLE → PLANNING(Planner.initial_plan)
        → DISPATCHING(Searcher 并行，沿用 DAG 分层 + Semaphore + 超时)
        → COLLECTING(EvidenceAssembly → CitationVerifier → EvidenceStore → 写入 ResearchState)
-       → REVIEWING(Reviewer：覆盖度/冲突/缺口)
+            → REVIEWING(Reviewer：覆盖度/冲突/缺口)
             ├─ SUFFICIENT → REFINING(Refiner → Final Answer)
             ├─ NEED_MORE 且 iteration < max_iterations 且 有有效新增
             │      → INCREMENTAL_PLANNING → DISPATCHING
             └─ 否则（达上限 / 无有效新增）→ REFINING（状态记为 PARTIALLY_SUFFICIENT）
        → DONE / FAILED
+
+direct 消融模式在 COLLECTING 后直接进入 REFINING，跳过 Reviewer 和增量补查。
 
 旧 deep-research 的 SYNTHESIZING / REPLANNING 状态不在合同流中使用。
 """
@@ -28,6 +30,7 @@ from .schemas import (
     ResearchReport,
     RunConfig,
     TaskType,
+    OrchestrationMode,
 )
 from .agent_pool import AgentPool
 from ..planner.dag import DAG
@@ -90,9 +93,23 @@ class Orchestrator:
         self._query: str = ""
         self._config: RunConfig = RunConfig()
         self._start_time: float = 0.0
-        self._evidence_store = evidence_store or EvidenceStore()
+        # EvidenceStore 实现了 __len__，空库在 bool() 下为 False；必须按 None 判断，
+        # 否则调用方传入的空库会被静默替换。
+        self._evidence_store = evidence_store if evidence_store is not None else EvidenceStore()
         self._research_state: ResearchState | None = None
         self._num_searches = 0
+        self._planning_rounds = 0
+        self._searcher_count = 0
+        self._search_tool_call_count = 0
+        self._searcher_token_usage_total = 0
+        self._reviewer_calls = 0
+        self._reviewer_sufficient = False
+        self._candidate_count_total = 0
+        self._materialize_failed_count = 0
+        self._verifier_rejected_count = 0
+        self._verified_evidence_count = 0
+        self._drop_reasons: dict[str, int] = {}
+        self._stop_reason = ""
         # 本次运行所有 Agent（Planner/Searcher/Reviewer/Refiner）的 LLM token 账本（run 时开启）
         self._token_ledger: list[int] = []
 
@@ -124,6 +141,18 @@ class Orchestrator:
         self._evidence_store = EvidenceStore()  # 每次运行独立证据库
         self._research_state = None
         self._num_searches = 0
+        self._planning_rounds = 0
+        self._searcher_count = 0
+        self._search_tool_call_count = 0
+        self._searcher_token_usage_total = 0
+        self._reviewer_calls = 0
+        self._reviewer_sufficient = False
+        self._candidate_count_total = 0
+        self._materialize_failed_count = 0
+        self._verifier_rejected_count = 0
+        self._verified_evidence_count = 0
+        self._drop_reasons = {}
+        self._stop_reason = ""
 
         self._token_ledger = enter_token_ledger()
         try:
@@ -136,10 +165,13 @@ class Orchestrator:
                         OrchestratorState.INCREMENTAL_PLANNING,
                     ):
                         print("[Timeout] 全局超时，强制进入 Refiner（使用已有证据）")
+                        self._stop_reason = "global_timeout"
+                        if self._research_state is not None:
+                            self._research_state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
                         self._current_state = OrchestratorState.REFINING
                     else:
                         self._current_state = OrchestratorState.FAILED
-                    break
+                    continue
 
                 handler = self._state_handlers.get(self._current_state)
                 if handler is None:
@@ -156,6 +188,7 @@ class Orchestrator:
                 report = ResearchReport(query=query, content="Report generation failed unexpectedly.")
             report.num_searches = self._num_searches
             report.num_replan = max(0, (self._research_state.iteration if self._research_state else 1) - 1)
+            report.telemetry = self.last_run_telemetry(report)
             if self.memory_store is not None:
                 try:
                     self._store_final_to_memory(report)
@@ -163,7 +196,9 @@ class Orchestrator:
                     print(f"[M4] Failed to store final report: {e}")
             return report
 
-        return ResearchReport(query=query, content="Research failed due to persistent errors or global timeout.")
+        failed_report = ResearchReport(query=query, content="Research failed due to persistent errors or global timeout.")
+        failed_report.telemetry = self.last_run_telemetry(failed_report)
+        return failed_report
 
     # ------------------------------------------------------------------
     # 状态机处理器
@@ -173,14 +208,17 @@ class Orchestrator:
 
     async def _do_planning(self) -> OrchestratorState:
         """初始规划：拆解研究问题（不生成任何结论）。"""
+        self._planning_rounds += 1
         try:
             questions = self.planner.initial_plan(self._query)
         except Exception as e:  # noqa: BLE001
             print(f"[Planning] Failed: {e}")
+            self._stop_reason = "planning_failed"
             return OrchestratorState.FAILED
 
         if not questions:
             print("[Planning] Planner 未返回任何调查问题")
+            self._stop_reason = "planning_empty"
             return OrchestratorState.FAILED
 
         self._research_state = ResearchState(
@@ -208,6 +246,7 @@ class Orchestrator:
 
         for layer_idx, group in enumerate(parallel_groups):
             print(f"[Dispatch] ▶ Layer {layer_idx + 1}/{len(parallel_groups)}: {group} (并行执行)")
+            self._searcher_count += len(group)
 
             async def _run_one(task_id: str) -> AgentResult:
                 async with semaphore:
@@ -248,6 +287,7 @@ class Orchestrator:
         """收集 WorkerResult → 更新 ResearchState（证据装配已完成于 Worker 内部，此处记账）。"""
         state = self._require_state()
         for r in self._results:
+            self._searcher_token_usage_total += int(getattr(r, "token_usage", 0) or 0)
             if r.status != AgentStatus.SUCCESS:
                 print(f"  [worker-fail] {r.task_id}: {r.status.value} -> {str(r.output)[:300]}")
                 continue
@@ -268,6 +308,22 @@ class Orchestrator:
                 if e.evidence_id not in state.evidence_ids:
                     state.evidence_ids.append(e.evidence_id)
             self._num_searches += len(wr.search_queries)
+            self._search_tool_call_count += int(getattr(wr, "search_tool_call_count", 0) or 0)
+            self._candidate_count_total += int(getattr(wr, "candidate_count", 0) or 0)
+            self._materialize_failed_count += int(getattr(wr, "materialize_failed_count", 0) or 0)
+            self._verifier_rejected_count += int(getattr(wr, "verifier_rejected_count", 0) or 0)
+            self._verified_evidence_count += int(getattr(wr, "verified_evidence_count", 0) or 0)
+            for reason, count in (getattr(wr, "drop_reasons", {}) or {}).items():
+                try:
+                    self._drop_reasons[str(reason)] = self._drop_reasons.get(str(reason), 0) + int(count or 0)
+                except (TypeError, ValueError):
+                    # 旧/自定义 WorkerResult 可能带有非数值原因计数，忽略该条但不影响主链路。
+                    continue
+
+        if self._config.orchestration_mode == OrchestrationMode.DIRECT.value:
+            state.final_status = FinalStatus.UNREVIEWED
+            self._stop_reason = "direct_after_search"
+            return OrchestratorState.REFINING
 
         success = sum(1 for r in self._results if r.status == AgentStatus.SUCCESS)
         print(f"[Collect] 本轮子任务完成: {success}/{len(self._results)}；现有证据 {len(self._evidence_store)} 条")
@@ -278,8 +334,10 @@ class Orchestrator:
         state = self._require_state()
         if self.reviewer is None:
             state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            self._stop_reason = "reviewer_unavailable"
             return OrchestratorState.REFINING
 
+        self._reviewer_calls += 1
         previous = state.review_history[-1] if state.review_history else None
         review = self.reviewer.review(state, self._evidence_store, previous)
         state.review_history.append(review)
@@ -296,14 +354,18 @@ class Orchestrator:
 
         if review.status == ReviewStatus.SUFFICIENT:
             state.final_status = FinalStatus.SUFFICIENT
+            self._reviewer_sufficient = True
+            self._stop_reason = "reviewer_sufficient"
             return OrchestratorState.REFINING
 
         # NEED_MORE：达轮次上限或无有效新增 → 部分足够，收尾
         if state.iteration >= self._config.max_iterations:
             state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            self._stop_reason = "max_iterations"
             return OrchestratorState.REFINING
         if self._config.stop_on_no_effective_new_evidence and not review.effective_new_evidence:
             state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            self._stop_reason = "no_effective_new_evidence"
             return OrchestratorState.REFINING
 
         return OrchestratorState.INCREMENTAL_PLANNING
@@ -311,14 +373,20 @@ class Orchestrator:
     async def _do_incremental_planning(self) -> OrchestratorState:
         """增量规划：只补缺失要点，然后继续派发 Worker。"""
         state = self._require_state()
+        self._planning_rounds += 1
         try:
             new_questions = self.planner.incremental_plan(state)
         except Exception as e:  # noqa: BLE001
             print(f"[Incremental] Failed: {e}")
             state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            self._stop_reason = "incremental_plan_failed"
             return OrchestratorState.REFINING
 
         state.iteration += 1
+        if not new_questions:
+            state.final_status = FinalStatus.PARTIALLY_SUFFICIENT
+            self._stop_reason = "incremental_plan_empty"
+            return OrchestratorState.REFINING
         for q in new_questions:
             state.questions.append(q)
             state.active_question_ids.append(q.question_id)
@@ -331,6 +399,7 @@ class Orchestrator:
         """Refiner：唯一生成结论的 Agent，产出结构化结果并渲染 Markdown。"""
         state = self._require_state()
         if self.refiner is None:
+            self._stop_reason = self._stop_reason or "refiner_unavailable"
             self._runtime["final_report"] = ResearchReport(
                 query=self._query,
                 content="Refiner 未配置。",
@@ -342,6 +411,7 @@ class Orchestrator:
             refiner_result = self.refiner.refine(state, self._evidence_store)
         except Exception as e:  # noqa: BLE001
             print(f"[Refiner] Failed: {e}")
+            self._stop_reason = self._stop_reason or "refiner_failed"
             refiner_result = None
 
         if refiner_result is None:
@@ -410,7 +480,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
     def last_run_token_usage(self) -> int:
         """本轮 Searcher 的估算 token 总用量（estimate_messages_tokens 口径）。"""
-        return sum(int(getattr(r, "token_usage", 0) or 0) for r in self._results)
+        return self._searcher_token_usage_total
 
     def last_run_total_token_usage(self) -> int:
         """本轮所有 Agent（Planner + 并行 Searcher + Reviewer + Refiner）的估算 token 总用量。"""
@@ -419,6 +489,34 @@ class Orchestrator:
     def last_run_evidence(self) -> "EvidenceStore":
         """本轮运行期证据库（评测把最相关证据原文交给标签适配器时取用）。"""
         return self._evidence_store
+
+    def last_run_telemetry(self, report=None) -> dict:
+        """返回本轮编排、检索、校验与停止原因遥测。"""
+        structured = getattr(report, "structured", {}) if report is not None else {}
+        citation_audit = dict(structured.get("citation_audit") or {}) if isinstance(structured, dict) else {}
+        telemetry = {
+            "orchestration_mode": self._config.orchestration_mode,
+            "planning_rounds": self._planning_rounds,
+            "searcher_count": self._searcher_count,
+            "search_tool_call_count": self._search_tool_call_count,
+            "search_query_count": self._num_searches,
+            "searcher_token_usage": self._searcher_token_usage_total,
+            "reviewer_calls": self._reviewer_calls,
+            "reviewer_sufficient": self._reviewer_sufficient,
+            "stop_reason": self._stop_reason or "unknown",
+            "early_stop_triggered": self._stop_reason == "no_effective_new_evidence",
+            "max_iterations_reached": self._stop_reason == "max_iterations",
+            "candidate_count": self._candidate_count_total,
+            "materialize_failed_count": self._materialize_failed_count,
+            "verifier_rejected_count": self._verifier_rejected_count,
+            "verified_evidence_count": self._verified_evidence_count,
+            "drop_reasons": dict(self._drop_reasons),
+            "n_evidence": len(self._evidence_store),
+            "citation_audit": citation_audit,
+        }
+        # 同时保留嵌套审计对象和扁平字段，便于报告消费者直接读取指标；旧消费者只会看到新增字段。
+        telemetry.update(citation_audit)
+        return telemetry
 
     def _is_global_timeout(self) -> bool:
         return time.monotonic() - self._start_time > self._config.global_timeout_seconds

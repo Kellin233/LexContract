@@ -183,6 +183,12 @@ python tests/contract_smoke.py
 - **LegalBenchRAG**（`contractnli / cuad / maud / privacy_qa`）：每条 query 跑完整 LLM Searcher（多轮检索收集完整条款），指标为文档层 `agent_doc_precision / agent_doc_recall`（证据命中的 gold 相关文档占比 / 覆盖比例）＋ 字符层 `agent_span_precision / agent_span_recall / agent_span_f1`（证据对 gold 字符区间的重叠，官方区间口径）。
 - **ContractNLI**（端到端分类）：每条实例把 hypothesis 当研究问题、作用域锁到该合同，跑一遍正式完整链路（Planner → Searcher → Reviewer → Refiner），评测给 Refiner 切换 3 选 1 标签专用提示词（`entailment / contradiction / neutral`），从 `conclusion` 字段提取分类结果；正式生产链路不注入该提示词。输出 Accuracy / weighted F1 / per-class F1。实例间可并发（默认 2）。
 
+**证据与编排遥测**
+
+- 引用审计按最终答案中去重后的原始 Evidence ID 统计：`citation_total_count`、`existing_evidence_id_count`、`missing_evidence_id_count`、`source_text_match_count`，其中 `citation_validity_rate = source_text_match_count / citation_total_count`，无引用时为 0。
+- Searcher 记录候选数、物化失败数、CitationVerifier 拦截数与通过数及具体 `drop_reasons`，并跨所有研究轮次累计；完整链路另记录平均规划轮数、Searcher 数、`search/grep` Tool Call 数、Reviewer `SUFFICIENT` 比例、Early Stop（仅 `no_effective_new_evidence`）比例和达到 `max_iterations` 比例。停止原因还包括 `reviewer_sufficient`、`direct_after_search`、`incremental_plan_empty`。
+- LegalBenchRAG 的 `evidence_hit_rate`：返回的完整条款与同文档 gold 字符区间有正长度重叠即命中，整体为所有任务的命中证据总数 / 返回证据总数；其他 LegalBenchRAG 指标仍按 benchmark 等权聚合。
+
 ```bash
 # 语料入库（LegalBenchRAG 会话为空时评测会自动处理；ContractNLI 需手动入库或加 --ingest-nli）
 python -m src.contract.eval.ingest_raw contractnli --root <LegalBenchRAG根目录>   # cuad / maud / privacy_qa
@@ -198,6 +204,12 @@ python -m src.contract.eval.main --mode contractnli --limit 15 --nli-concurrency
 # 小批量冒烟：预生成请求集（configs/eval_sets/smoke_*.json）只跑子集
 python -m src.contract.eval.main --mode legalbenchrag --request-set configs/eval_sets/smoke_legalbenchrag_3.json
 python -m src.contract.eval.main --mode contractnli --request-set configs/eval_sets/smoke_contractnli_5.json
+
+# ContractNLI 编排消融（默认使用固定的 10% 请求集 configs/eval_sets/contractnli_15.json）
+python -m src.contract.eval.ablation
+# ContractNLI 150 条与 LegalBenchRAG 100 条正常评测
+python -m src.contract.eval.main --mode contractnli --request-set configs/eval_sets/contractnli_150.json
+python -m src.contract.eval.main --mode legalbenchrag --request-set configs/eval_sets/legalbenchrag_100.json
 ```
 
 **评测表现（2026-08 实测）**

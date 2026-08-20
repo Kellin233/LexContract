@@ -16,6 +16,7 @@ toolkit / agent_pool / orchestrator”（toolkit 的会话+文档作用域是共
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import random
 import time
@@ -43,8 +44,9 @@ def run_contractnli_fullchain(
     concurrency: int = 2,
     searcher_max_rounds: int | None = None,
     searcher_max_searches_per_round: int | None = None,
+    orchestration_mode: str = "reviewed_incremental",
 ) -> dict:
-    """执行完整链路 ContractNLI 评测（实例间并发），返回 {evaluated, skipped_done, errors} 统计。"""
+    """执行 ContractNLI 评测（实例间并发），支持 direct / reviewed_incremental 编排模式。"""
     done = done_ids or set()
     if limit:
         rng = random.Random(seed)
@@ -67,10 +69,14 @@ def run_contractnli_fullchain(
                         if searcher_max_searches_per_round is not None else _c.get("searcher_max_searches_per_round", 1))
     dedup = bool(_c.get("searcher_dedup_tool_results", True))
 
-    base = _build_nli_base(modules, config)  # 共享 policy/planner/reviewer + NLI-refiner
+    run_config = copy.deepcopy(config)
+    if not isinstance(run_config.get("contract"), dict):
+        run_config["contract"] = {}
+    run_config["contract"]["orchestration_mode"] = orchestration_mode
+    base = _build_nli_base(modules, run_config)  # 共享 policy/planner/reviewer + NLI-refiner
 
     def _run_one(rec: dict) -> NliRecord:
-        return _run_single_instance(rec, base, config, nli_session=nli_session, output_dir=output_dir,
+        return _run_single_instance(rec, base, run_config, nli_session=nli_session, output_dir=output_dir,
                                     max_rounds=max_rounds, max_per_round=max_per_round, dedup=dedup)
 
     if int(concurrency) > 1:
@@ -195,6 +201,7 @@ def _run_single_instance(rec: dict, base: dict, config: dict, *, nli_session: st
     record.elapsed_s = time.time() - t0
     record.correct = (record.pred_label == gold)
     record.telemetry.setdefault("doc_found", "doc not found" not in (record.error or ""))
+    record.telemetry.setdefault("run_completed", record.pred_valid or record.error is None)
     return record
 
 
@@ -216,6 +223,12 @@ def _apply_chain_label(report, record: NliRecord, orchestrator) -> None:
 
     evidence_store = orchestrator.last_run_evidence() if orchestrator is not None else None
     supporting_ids = list(structured.get("supporting_evidence_ids") or [])
+    orchestration_telemetry = (
+        orchestrator.last_run_telemetry(report)
+        if orchestrator is not None and hasattr(orchestrator, "last_run_telemetry")
+        else {}
+    )
+    citation_audit = dict(structured.get("citation_audit") or {})
     record.telemetry = {
         "refiner_mode": "contractnli_nli_prompt",
         "searcher_token_usage": orchestrator.last_run_token_usage() if orchestrator is not None else 0,
@@ -226,7 +239,10 @@ def _apply_chain_label(report, record: NliRecord, orchestrator) -> None:
         "n_evidence": len(evidence_store.all()) if evidence_store is not None else 0,
         "n_supporting": len(supporting_ids),
         "chain_conclusion_preview": str(structured.get("conclusion", ""))[:200],
+        "run_completed": True,
     }
+    record.telemetry.update(orchestration_telemetry)
+    record.telemetry.update(citation_audit)
 
 
 def _doc_exists(session_id: str, doc_id: str) -> bool:
@@ -258,6 +274,14 @@ def summarize_contractnli_records(records_path: str | Path) -> dict:
     n_total = n_errors = 0
     sum_searcher_tokens = 0
     sum_total_tokens = 0
+    citation_total = citation_existing = citation_missing = citation_source_match = 0
+    candidate_total = verified_evidence = verifier_rejected = materialize_failed = 0
+    drop_reasons_total: dict[str, int] = {}
+    planning_rounds = searcher_count = search_tool_calls = 0
+    completed_runs = 0
+    reviewer_calls_total = reviewer_runs = reviewer_sufficient_runs = early_stop_runs = max_iteration_runs = 0
+    stop_reason_counts: dict[str, int] = {}
+    elapsed_total = 0.0
     with open(records_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -268,6 +292,36 @@ def summarize_contractnli_records(records_path: str | Path) -> dict:
             tel = rec.get("telemetry") or {}
             sum_searcher_tokens += int(tel.get("searcher_token_usage", 0) or 0)
             sum_total_tokens += int(tel.get("total_token_usage", 0) or 0)
+            citation_total += int(tel.get("total_citation_count", 0) or 0)
+            citation_existing += int(tel.get("existing_evidence_id_count", 0) or 0)
+            citation_missing += int(tel.get("missing_evidence_id_count", 0) or 0)
+            citation_source_match += int(tel.get("source_text_match_count", 0) or 0)
+            candidate_total += int(tel.get("candidate_count", 0) or 0)
+            verified_evidence += int(tel.get("verified_evidence_count", 0) or 0)
+            verifier_rejected += int(tel.get("verifier_rejected_count", 0) or 0)
+            materialize_failed += int(tel.get("materialize_failed_count", 0) or 0)
+            for reason, count in (tel.get("drop_reasons") or {}).items():
+                try:
+                    drop_reasons_total[str(reason)] = drop_reasons_total.get(str(reason), 0) + int(count or 0)
+                except (TypeError, ValueError):
+                    continue
+            planning_rounds += int(tel.get("planning_rounds", 0) or 0)
+            searcher_count += int(tel.get("searcher_count", 0) or 0)
+            search_tool_calls += int(tel.get("search_tool_call_count", 0) or 0)
+            elapsed_total += float(rec.get("elapsed_s", 0.0) or 0.0)
+            run_completed = bool(tel.get("run_completed", rec.get("pred_valid", False)))
+            if run_completed:
+                completed_runs += 1
+            reviewer_calls = int(tel.get("reviewer_calls", 0) or 0)
+            reviewer_calls_total += reviewer_calls
+            if reviewer_calls > 0:
+                reviewer_runs += 1
+                reviewer_sufficient_runs += int(bool(tel.get("reviewer_sufficient", False)))
+            stop_reason = str(tel.get("stop_reason", "") or "")
+            if stop_reason:
+                stop_reason_counts[stop_reason] = stop_reason_counts.get(stop_reason, 0) + 1
+            early_stop_runs += int(stop_reason == "no_effective_new_evidence")
+            max_iteration_runs += int(stop_reason == "max_iterations")
             if not rec.get("pred_valid"):
                 n_errors += 1
                 continue
@@ -276,6 +330,7 @@ def summarize_contractnli_records(records_path: str | Path) -> dict:
     from . import metrics as M
 
     acc_all = M.accuracy(y_true, y_pred) if y_true else 0.0
+    avg_den = completed_runs or n_total or 1
     return {
         "n_total": n_total,
         "n_errors": n_errors,
@@ -286,4 +341,27 @@ def summarize_contractnli_records(records_path: str | Path) -> dict:
         "class_counts_pred": {c: y_pred.count(c) for c in sorted(set(y_pred))},
         "searcher_token_usage": sum_searcher_tokens,
         "total_token_usage": sum_total_tokens,
+        "citation_total_count": citation_total,
+        "existing_evidence_id_count": citation_existing,
+        "missing_evidence_id_count": citation_missing,
+        "source_text_match_count": citation_source_match,
+        "citation_validity_rate": citation_source_match / citation_total if citation_total else 0.0,
+        "candidate_count": candidate_total,
+        "verified_evidence_count": verified_evidence,
+        "verifier_rejected_count": verifier_rejected,
+        "materialize_failed_count": materialize_failed,
+        "drop_reasons": drop_reasons_total,
+        "planning_rounds_avg": planning_rounds / avg_den,
+        "searcher_count_avg": searcher_count / avg_den,
+        "search_tool_call_count_avg": search_tool_calls / avg_den,
+        "reviewer_sufficient_rate": (
+            reviewer_sufficient_runs / reviewer_runs if reviewer_runs else None
+        ),
+        "reviewer_calls_total": reviewer_calls_total,
+        "reviewed_run_count": reviewer_runs,
+        "reviewer_sufficient_count": reviewer_sufficient_runs,
+        "stop_reason_counts": stop_reason_counts,
+        "early_stop_rate": early_stop_runs / avg_den,
+        "max_iteration_rate": max_iteration_runs / avg_den,
+        "elapsed_s_avg": elapsed_total / avg_den,
     }

@@ -16,6 +16,7 @@ __all__ = [
     "union_spans",
     "span_overlap_len",
     "span_precision_recall_f1",
+    "evidence_hit_rate",
     "accuracy",
     "f1_weighted",
     "f1_per_class",
@@ -128,6 +129,29 @@ def span_precision_recall_f1(
     recall = overlap / gold_chars if gold_chars else 0.0
     f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
     return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def evidence_hit_rate(
+    retrieved: Sequence[tuple[str, Sequence[int]]],
+    gold_by_file: dict[str, Sequence[Sequence[int]]],
+) -> dict[str, float | int]:
+    """按证据条目统计命中率：与同文件 gold 区间有正长度重叠即命中。
+
+    返回命中数、返回数和命中率；相邻但不重叠的区间不算命中。
+    """
+    returned = 0
+    hit = 0
+    for file_path, span in retrieved:
+        if not file_path or len(span) != 2 or int(span[1]) <= int(span[0]):
+            continue
+        returned += 1
+        if span_overlap_len([span], gold_by_file.get(file_path, [])) > 0:
+            hit += 1
+    return {
+        "hit_count": hit,
+        "returned_count": returned,
+        "rate": hit / returned if returned else 0.0,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ dev = [
 [project.scripts]
 # 命令行快捷入口（主流程按 README 用 python scripts/run_single.py 运行）
 lexcontract-eval = "src.contract.eval.main:main"
+lexcontract-ablation = "src.contract.eval.ablation:main"
 
 [tool.setuptools.packages.find]
 include = ["src", "src.*"]

@@ -221,6 +221,7 @@ async def run_research(
         enable_evidence_verification=contract_cfg.get("enable_evidence_verification", True),
         session_id=session_id or "",
         doc_ids=list(doc_ids or []),
+        orchestration_mode=str(contract_cfg.get("orchestration_mode", "reviewed_incremental")),
     )
 
     orchestrator = modules["orchestrator"]
@@ -318,6 +319,7 @@ def save_report(report, query: str, output_dir: str = "outputs/reports") -> tupl
         "confidence": getattr(report, "confidence", 0.0),
         "num_searches": getattr(report, "num_searches", 0),
         "num_replan": getattr(report, "num_replan", 0),
+        "telemetry": getattr(report, "telemetry", {}) or {},
         "result": structured,
     }
     import json as _json

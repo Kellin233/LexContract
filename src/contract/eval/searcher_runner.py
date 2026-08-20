@@ -106,10 +106,28 @@ def run_legalbench(
                 len(set(ev_files) & gold_set) / len(gold_set) if gold_set else 0.0
             )
             asp = M.span_precision_recall_f1(adapter.spans_by_file(hits), gold_spans)
+            hit_stats = M.evidence_hit_rate(
+                [(h.file_path, h.span) for h in record.searcher_hits], gold_spans
+            )
+            hit_count = int(hit_stats["hit_count"])
+            returned_count = int(hit_stats["returned_count"])
             record.scores.update({
                 "agent_span_precision": asp["precision"],
                 "agent_span_recall": asp["recall"],
                 "agent_span_f1": asp["f1"],
+                "evidence_hit_rate": hit_count / returned_count if returned_count else 0.0,
+            })
+            record.telemetry.update({
+                "evidence_returned_count": returned_count,
+                "evidence_hit_count": hit_count,
+                "materialize_failed_count": int(
+                    getattr(worker, "materialize_failed_count", 0)
+                    or (getattr(worker, "drop_reasons", {}) or {}).get("materialize-fail", 0)
+                ),
+                "verifier_rejected_count": int(getattr(worker, "verifier_rejected_count", 0) or 0),
+                "verified_evidence_count": int(getattr(worker, "verified_evidence_count", 0) or 0),
+                "candidate_count": int(getattr(worker, "candidate_count", 0) or 0),
+                "search_tool_call_count": int(getattr(worker, "search_tool_call_count", 0) or 0),
             })
         else:
             record.searcher_error = record.searcher_error or "Searcher returned no result"
@@ -156,10 +174,19 @@ def summarize_legalbench_records(records_path: str | Path) -> dict:
     from .persist import load_done_ids
 
     keys = ["agent_doc_precision", "agent_doc_recall",
-            "agent_span_precision", "agent_span_recall", "agent_span_f1"]
+            "agent_span_precision", "agent_span_recall", "agent_span_f1",
+            "evidence_hit_rate"]
     stats: dict[str, list[float]] = {k: [] for k in keys}
     n_agent = 0
     n_searcher_error = 0
+    evidence_returned = 0
+    evidence_hit = 0
+    candidate_count = 0
+    verified_evidence = 0
+    verifier_rejected = 0
+    materialize_failed = 0
+    search_tool_calls = 0
+    drop_reasons_total: dict[str, int] = {}
     with open(records_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -173,6 +200,19 @@ def summarize_legalbench_records(records_path: str | Path) -> dict:
                     stats[key].append(float(v))
             if rec.get("telemetry", {}).get("ran_agent"):
                 n_agent += 1
+            tel = rec.get("telemetry") or {}
+            evidence_returned += int(tel.get("evidence_returned_count", 0) or 0)
+            evidence_hit += int(tel.get("evidence_hit_count", 0) or 0)
+            candidate_count += int(tel.get("candidate_count", 0) or 0)
+            verified_evidence += int(tel.get("verified_evidence_count", 0) or 0)
+            verifier_rejected += int(tel.get("verifier_rejected_count", 0) or 0)
+            materialize_failed += int(tel.get("materialize_failed_count", 0) or 0)
+            search_tool_calls += int(tel.get("search_tool_call_count", 0) or 0)
+            for reason, count in (tel.get("drop_reasons") or {}).items():
+                try:
+                    drop_reasons_total[str(reason)] = drop_reasons_total.get(str(reason), 0) + int(count or 0)
+                except (TypeError, ValueError):
+                    continue
             if rec.get("searcher_error"):
                 n_searcher_error += 1
     n_queries = len(load_done_ids(records_path))
@@ -181,6 +221,15 @@ def summarize_legalbench_records(records_path: str | Path) -> dict:
         "n_agent": n_agent,
         "n_searcher_error": n_searcher_error,
         "metrics": {key: _mean(vals) for key, vals in stats.items() if vals},
+        "evidence_returned_count": evidence_returned,
+        "evidence_hit_count": evidence_hit,
+        "evidence_hit_rate_micro": evidence_hit / evidence_returned if evidence_returned else 0.0,
+        "candidate_count": candidate_count,
+        "verified_evidence_count": verified_evidence,
+        "verifier_rejected_count": verifier_rejected,
+        "materialize_failed_count": materialize_failed,
+        "search_tool_call_count": search_tool_calls,
+        "drop_reasons": drop_reasons_total,
         "all": {key: vals for key, vals in stats.items()},
         "key_weights": {key: len(vals) for key, vals in stats.items()},
     }

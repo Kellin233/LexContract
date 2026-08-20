@@ -319,7 +319,8 @@ class Searcher(BaseAgent):
                   f"(tool-result dedup on: {self.dedup_tool_results})")
 
         worker_result = self._assemble_worker_result(
-            candidates, question_id, question, searched, search_queries, store
+            candidates, question_id, question, searched, search_queries, store,
+            search_tool_call_count=search_count,
         )
         return AgentResult(
             task_id=question_id,
@@ -377,7 +378,8 @@ class Searcher(BaseAgent):
 
     def _assemble_worker_result(self, candidates: list, question_id: str, question: str,
                                 searched: bool, search_queries: list[str],
-                                store: "EvidenceStore | None" = None) -> WorkerResult:
+                                store: "EvidenceStore | None" = None,
+                                search_tool_call_count: int = 0) -> WorkerResult:
         """候选 → 物化 → 校验 → 入证据库（去重）。
 
         注意：EvidenceStore 定义了 __len__，空库在 bool() 下为 False，
@@ -391,21 +393,34 @@ class Searcher(BaseAgent):
             search_queries=search_queries,
             searched=searched,
             no_evidence_found=False,
+            candidate_count=len(candidates),
+            search_tool_call_count=search_tool_call_count,
         )
         drop_reasons: Counter = Counter()
+        materialize_failed = 0
+        verifier_rejected = 0
+        verified_count = 0
         for cand in candidates:
             if not isinstance(cand, dict):
+                drop_reasons["materialize-fail"] += 1
+                materialize_failed += 1
                 continue
             ev = self.assembler.materialize(cand, question_id)
             if ev is None:
                 drop_reasons["materialize-fail"] += 1
+                materialize_failed += 1
                 continue
             if not self.verifier.verify(ev):
                 drop_reasons[ev.verify_note or "verify-fail"] += 1
+                verifier_rejected += 1
                 continue  # 原文校验失败，丢弃
+            verified_count += 1
             registered, _ = store.register(ev, question_id)
             result.evidences.append(registered)
         result.drop_reasons = dict(drop_reasons)
+        result.materialize_failed_count = materialize_failed
+        result.verifier_rejected_count = verifier_rejected
+        result.verified_evidence_count = verified_count
         result.no_evidence_found = result.searched and not result.evidences
         return result
 

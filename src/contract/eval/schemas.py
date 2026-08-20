@@ -30,7 +30,7 @@ class LegalQueryRecord(BaseModel):
     # LLM Searcher 实际召回的证据（span 覆盖指标依据）
     searcher_hits: list[LegalChunkHit] = Field(default_factory=list)
     # 单条得分：recall_at_{k} / mrr / span_precision / span_recall / span_f1 /
-    #           agent_span_precision / agent_span_recall / agent_span_f1
+    #           agent_span_precision / agent_span_recall / agent_span_f1 / evidence_hit_rate
     scores: dict[str, float] = Field(default_factory=dict)
     searcher_searched: bool = False
     searcher_error: Optional[str] = None
@@ -74,6 +74,7 @@ class EvalSummary(BaseModel):
     elapsed_s: float = 0.0
     config: dict = Field(default_factory=dict)
     metrics: dict = Field(default_factory=dict, description="聚合指标")
+    telemetry: dict = Field(default_factory=dict, description="编排、检索、证据校验和引用审计汇总")
     per_benchmark: dict = Field(default_factory=dict, description="legalbenchrag 按 benchmark 分组的指标")
     n_instances: int = 0
     n_errors: int = 0

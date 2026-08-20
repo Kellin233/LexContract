@@ -62,6 +62,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Searcher 最多检索轮数（覆写 contract.searcher_max_search_rounds；A/B 对照用）")
     p.add_argument("--searcher-max-searches-per-round", type=int, default=None,
                    help="Searcher 每轮最多检索词数（覆写 contract.searcher_max_searches_per_round；A/B 对照用）")
+    p.add_argument("--orchestration-mode", choices=["direct", "reviewed_incremental"],
+                   default=None, help="ContractNLI 编排模式：direct 或 reviewed_incremental")
     p.add_argument("--ingest-nli", action="store_true",
                    help="ContractNLI 会话为空时允许自动入库（默认禁止）")
     p.add_argument("--request-set", default=None,
@@ -192,6 +194,14 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             request_docs[b] = list(info.get("doc_ids", []))
 
     per_benchmark: dict = {}
+    evidence_returned_total = 0
+    evidence_hit_total = 0
+    candidate_total = 0
+    verified_evidence_total = 0
+    verifier_rejected_total = 0
+    materialize_failed_total = 0
+    search_tool_calls_total = 0
+    drop_reasons_total: dict[str, int] = {}
     n_instances = n_errors = n_resumed = 0
 
     for name in names:
@@ -236,14 +246,38 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             make_searcher=factory,
         )
         summ = summarize_legalbench_records(records_path)
+        benchmark_metrics = dict(summ["metrics"])
+        benchmark_metrics["evidence_hit_rate"] = summ.get("evidence_hit_rate_micro", 0.0)
         per_benchmark[name] = {
             "n_queries": summ["n_queries"],
             "n_agent": summ["n_agent"],
             "n_errors": summ["n_searcher_error"],
-            "metrics": summ["metrics"],
+            "metrics": benchmark_metrics,
+            "telemetry": {
+                "evidence_returned_count": summ.get("evidence_returned_count", 0),
+                "evidence_hit_count": summ.get("evidence_hit_count", 0),
+                "candidate_count": summ.get("candidate_count", 0),
+                "verified_evidence_count": summ.get("verified_evidence_count", 0),
+                "verifier_rejected_count": summ.get("verifier_rejected_count", 0),
+                "materialize_failed_count": summ.get("materialize_failed_count", 0),
+                "search_tool_call_count": summ.get("search_tool_call_count", 0),
+                "drop_reasons": summ.get("drop_reasons", {}),
+            },
         }
         n_instances += summ["n_queries"]
         n_errors += summ["n_searcher_error"]
+        evidence_returned_total += int(summ.get("evidence_returned_count", 0) or 0)
+        evidence_hit_total += int(summ.get("evidence_hit_count", 0) or 0)
+        candidate_total += int(summ.get("candidate_count", 0) or 0)
+        verified_evidence_total += int(summ.get("verified_evidence_count", 0) or 0)
+        verifier_rejected_total += int(summ.get("verifier_rejected_count", 0) or 0)
+        materialize_failed_total += int(summ.get("materialize_failed_count", 0) or 0)
+        search_tool_calls_total += int(summ.get("search_tool_call_count", 0) or 0)
+        for reason, count in (summ.get("drop_reasons") or {}).items():
+            try:
+                drop_reasons_total[str(reason)] = drop_reasons_total.get(str(reason), 0) + int(count or 0)
+            except (TypeError, ValueError):
+                continue
         m = summ["metrics"]
         # 仅 Searcher 链路指标（确定性混合检索已移除）：
         # 文档覆盖率（找齐/找准）+ 证据对 gold 区间的字符重叠
@@ -267,9 +301,24 @@ def run_legalbenchrag(args: argparse.Namespace, eval_cfg: dict) -> int:
             vals = [v for v in vals if v is not None]
             if vals:
                 overall_metrics[key] = sum(0.25 * v for v in vals) / w_total
+    if present:
+        overall_metrics["evidence_hit_rate"] = (
+            evidence_hit_total / evidence_returned_total if evidence_returned_total else 0.0
+        )
 
     _write_legalbench_outputs(run_dir, eval_cfg, per_benchmark,
-                              overall_metrics, n_instances, n_errors, n_resumed, args)
+                              overall_metrics, n_instances, n_errors, n_resumed, args,
+                              telemetry={
+                                  "evidence_returned_count": evidence_returned_total,
+                                  "evidence_hit_count": evidence_hit_total,
+                                  "evidence_hit_rate": overall_metrics.get("evidence_hit_rate", 0.0),
+                                  "candidate_count": candidate_total,
+                                  "verified_evidence_count": verified_evidence_total,
+                                  "verifier_rejected_count": verifier_rejected_total,
+                                  "materialize_failed_count": materialize_failed_total,
+                                  "search_tool_call_count": search_tool_calls_total,
+                                  "drop_reasons": drop_reasons_total,
+                              })
     print(f"\n[legalbenchrag] 完成，输出目录: {run_dir}")
     return 0
 
@@ -278,7 +327,8 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict,
                               per_benchmark: dict,
                               overall_metrics: dict,
                               n_instances: int, n_errors: int, n_resumed: int,
-                              args: argparse.Namespace) -> None:
+                              args: argparse.Namespace,
+                              telemetry: dict | None = None) -> None:
     started_at = now_iso()
     summary = {
         "mode": "legalbenchrag",
@@ -293,9 +343,10 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict,
             "agent_doc_precision/recall": "Searcher 证据文档覆盖率（本系统扩展）：证据命中的 gold 相关文档占比 / gold 相关文档被覆盖比例（找准/找齐，文档层）",
             "agent_span_*": "Searcher 证据（恢复的完整条款）与 gold 字符区间的重叠 P/R/F1（官方 PAKTON 区间口径）",
             "链路说明": "LegalBenchRAG 仅跑完整 Searcher 链路（确定性混合检索已移除），每条 query 都经 Searcher 检索",
-            "整体聚合": "overall = Σ_bench(0.25 × 子任务内均值)，对本次实际运行的 benchmark 归一化（全量 4 个子任务时严格等于官方 0.25 等权）",
+            "整体聚合": "常规指标 overall = Σ_bench(0.25 × 子任务内均值)，对本次实际运行的 benchmark 归一化；evidence_hit_rate 使用所有返回证据的总命中数 / 总返回数",
         },
         "metrics": overall_metrics,
+        "telemetry": telemetry or {},
         "per_benchmark": per_benchmark,
         "n_instances": n_instances,
         "n_errors": n_errors,
@@ -306,7 +357,8 @@ def _write_legalbench_outputs(run_dir: Path, eval_cfg: dict,
 
     # metrics.csv：宽表（每 benchmark 一行 + overall 一行），仅 Searcher 链路指标
     metric_keys = ["agent_doc_precision", "agent_doc_recall",
-                   "agent_span_precision", "agent_span_recall", "agent_span_f1"]
+                   "agent_span_precision", "agent_span_recall", "agent_span_f1",
+                   "evidence_hit_rate"]
     rows: list[dict] = []
     for name, info in per_benchmark.items():
         row = {"benchmark": name, "n": info.get("n_queries", 0),
@@ -386,10 +438,13 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
         else int(_contract_cfg.get("searcher_max_search_rounds", 3))
     max_per_round = args.searcher_max_searches_per_round if args.searcher_max_searches_per_round is not None \
         else int(_contract_cfg.get("searcher_max_searches_per_round", 1))
+    orchestration_mode = args.orchestration_mode or str(
+        _contract_cfg.get("orchestration_mode", "reviewed_incremental")
+    )
     concurrency = args.nli_concurrency if args.nli_concurrency is not None \
         else int(eval_cfg.get("nli_concurrency", 2))
     print(f"[contractnli] Searcher 检索预算 = {max_rounds} 轮 × 每轮 {max_per_round} 问；"
-          f"实例并行度 = {concurrency}")
+          f"实例并行度 = {concurrency}；编排模式 = {orchestration_mode}")
 
     stats = run_contractnli_fullchain(records, modules=modules, config=config,
                                       records_path=records_path,
@@ -397,7 +452,8 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
                                       nli_session=nli_session, output_dir=str(run_dir),
                                       concurrency=concurrency,
                                       searcher_max_rounds=max_rounds,
-                                      searcher_max_searches_per_round=max_per_round)
+                                      searcher_max_searches_per_round=max_per_round,
+                                      orchestration_mode=orchestration_mode)
     summ = summarize_contractnli_records(records_path)
 
     summary = {
@@ -408,9 +464,35 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
                    "nli_session": nli_session,
                    "searcher_max_search_rounds": max_rounds,
                    "searcher_max_searches_per_round": max_per_round,
+                   "orchestration_mode": orchestration_mode,
                    "concurrency": concurrency,
                    "contractnli_jsonl": str(path)},
         "metrics": {k: v for k, v in summ.items() if k not in ("class_counts_true", "class_counts_pred")},
+        "telemetry": {
+            "citation_total_count": summ.get("citation_total_count", 0),
+            "existing_evidence_id_count": summ.get("existing_evidence_id_count", 0),
+            "missing_evidence_id_count": summ.get("missing_evidence_id_count", 0),
+            "source_text_match_count": summ.get("source_text_match_count", 0),
+            "citation_validity_rate": summ.get("citation_validity_rate", 0.0),
+            "candidate_count": summ.get("candidate_count", 0),
+            "verified_evidence_count": summ.get("verified_evidence_count", 0),
+            "materialize_failed_count": summ.get("materialize_failed_count", 0),
+            "verifier_rejected_count": summ.get("verifier_rejected_count", 0),
+            "drop_reasons": summ.get("drop_reasons", {}),
+            "planning_rounds_avg": summ.get("planning_rounds_avg", 0.0),
+            "searcher_count_avg": summ.get("searcher_count_avg", 0.0),
+            "search_tool_call_count_avg": summ.get("search_tool_call_count_avg", 0.0),
+            "reviewer_calls_total": summ.get("reviewer_calls_total", 0),
+            "reviewed_run_count": summ.get("reviewed_run_count", 0),
+            "reviewer_sufficient_count": summ.get("reviewer_sufficient_count", 0),
+            "reviewer_sufficient_rate": summ.get("reviewer_sufficient_rate"),
+            "early_stop_rate": summ.get("early_stop_rate", 0.0),
+            "max_iteration_rate": summ.get("max_iteration_rate", 0.0),
+            "stop_reason_counts": summ.get("stop_reason_counts", {}),
+            "searcher_token_usage": summ.get("searcher_token_usage", 0),
+            "total_token_usage": summ.get("total_token_usage", 0),
+            "elapsed_s_avg": summ.get("elapsed_s_avg", 0.0),
+        },
         "class_counts_true": summ.get("class_counts_true", {}),
         "class_counts_pred": summ.get("class_counts_pred", {}),
         "n_instances": summ["n_total"],
@@ -423,6 +505,22 @@ def run_contractnli_cli(args: argparse.Namespace, eval_cfg: dict) -> int:
             {"metric": "f1_weighted", "value": round(summ["f1_weighted"], 4)}]
     for cls, f1 in sorted(summ.get("f1_per_class", {}).items()):
         rows.append({"metric": f"f1_{cls}", "value": round(f1, 4)})
+    extra_metrics = [
+        "citation_validity_rate", "citation_total_count", "existing_evidence_id_count",
+        "missing_evidence_id_count", "source_text_match_count", "verifier_rejected_count",
+        "candidate_count", "verified_evidence_count", "materialize_failed_count",
+        "planning_rounds_avg", "searcher_count_avg",
+        "search_tool_call_count_avg", "reviewer_sufficient_rate", "early_stop_rate",
+        "max_iteration_rate", "reviewer_calls_total", "reviewed_run_count",
+        "reviewer_sufficient_count", "elapsed_s_avg", "searcher_token_usage", "total_token_usage",
+    ]
+    for name in extra_metrics:
+        value = summ.get(name)
+        rows.append({"metric": name, "value": "" if value is None else round(value, 4) if isinstance(value, float) else value})
+    for reason, count in sorted((summ.get("drop_reasons") or {}).items()):
+        rows.append({"metric": f"drop_reason_{reason}", "value": count})
+    for reason, count in sorted((summ.get("stop_reason_counts") or {}).items()):
+        rows.append({"metric": f"stop_reason_{reason}", "value": count})
     write_csv(run_dir / "metrics.csv", rows)
 
     print(f"[contractnli] 本次新增 {stats['evaluated']} 条（累计 {summ['n_total']}，错误 {summ['n_errors']}）")

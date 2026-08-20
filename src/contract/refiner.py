@@ -88,14 +88,20 @@ class Refiner:
         used_ids: list[str] = []
         for p in (data.get("points") or []):
             for eid in (p.get("evidence_ids") or []):
+                eid = str(eid)
                 if eid not in used_ids:
                     used_ids.append(eid)
+        raw_supporting_ids = [str(eid) for eid in (data.get("supporting_evidence_ids") or [])]
+        for eid in raw_supporting_ids:
+            if eid not in used_ids:
+                used_ids.append(eid)
         existing = {e.evidence_id for e in store.all()}
+        citation_audit = self._audit_citations(used_ids, existing, store)
         # 过滤不存在的证据 ID，避免引用幻觉
         used_ids = [eid for eid in used_ids if eid in existing]
 
         # “最支持结论的证据”：优先取模型显式选中的子集；若缺失/为空，退化为分点引用并集
-        supporting = [eid for eid in (data.get("supporting_evidence_ids") or []) if eid in existing]
+        supporting = [str(eid) for eid in (data.get("supporting_evidence_ids") or []) if str(eid) in existing]
         if not supporting:
             supporting = used_ids
 
@@ -104,13 +110,14 @@ class Refiner:
             points=[
                 RefinerPoint(
                     claim=str(p.get("claim", "")),
-                    evidence_ids=[eid for eid in (p.get("evidence_ids") or []) if eid in existing],
+                    evidence_ids=[str(eid) for eid in (p.get("evidence_ids") or []) if str(eid) in existing],
                 )
                 for p in (data.get("points") or [])
             ],
             supporting_evidence_ids=supporting,
             evidence_gap=[str(g) for g in (data.get("evidence_gap") or [])],
             final_status=final_status,
+            citation_audit=citation_audit,
         )
         # 依据仅落在“最支持结论的证据”子集上（可能是全部，也可能只是一部分）
         result.citations = self._build_citations(supporting, store)
@@ -118,6 +125,29 @@ class Refiner:
         if _budget_note:
             result.evidence_gap.append(f"[预算告警] {_budget_note}")
         return result
+
+    @staticmethod
+    def _audit_citations(evidence_ids: list[str], existing: set[str], store: EvidenceStore) -> dict:
+        """在过滤非法 ID 前统计最终答案引用的 ID 与原文映射情况。
+
+        引用按 Evidence ID 去重，覆盖 points 与 supporting_evidence_ids 两个字段。
+        Evidence.verified 是 CitationVerifier 对 quote/offset/full_text 的程序化校验结果。
+        """
+        total = len(evidence_ids)
+        existing_count = sum(1 for eid in evidence_ids if eid in existing)
+        missing_count = total - existing_count
+        source_match_count = 0
+        for eid in evidence_ids:
+            ev = store.get_by_id(eid) if eid in existing else None
+            if ev is not None and ev.verified:
+                source_match_count += 1
+        return {
+            "total_citation_count": total,
+            "existing_evidence_id_count": existing_count,
+            "missing_evidence_id_count": missing_count,
+            "source_text_match_count": source_match_count,
+            "citation_validity_rate": source_match_count / total if total else 0.0,
+        }
 
     # ------------------------------------------------------------------
     # 内部方法
@@ -145,14 +175,21 @@ class Refiner:
             final_status=final_status,
         )
         result.citations = self._build_citations(store.all_ids(), store)
+        result.citation_audit = self._audit_citations(store.all_ids(), set(store.all_ids()), store)
         result.markdown_body = render_markdown(state.original_question, result)
         return result
 
     def _build_prompt(self, state: ResearchState, store: EvidenceStore, final_status: FinalStatus) -> str:
+        if final_status == FinalStatus.SUFFICIENT:
+            status_note = " (evidence judged sufficient)"
+        elif final_status == FinalStatus.UNREVIEWED:
+            status_note = " (Reviewer skipped in direct orchestration ablation; assess the retrieved evidence directly)"
+        else:
+            status_note = " (insufficient evidence / iteration limit reached; state the gaps honestly)"
         lines = [
             f"## Original question\n{state.original_question}",
             f"## Evidence status\n{final_status.value}"
-            + (" (evidence judged sufficient)" if final_status == FinalStatus.SUFFICIENT else " (insufficient evidence / iteration limit reached; state the gaps honestly)"),
+            + status_note,
             "",
             "## Verified evidence (full text)",
         ]
@@ -168,7 +205,12 @@ class Refiner:
 
 def render_markdown(question: str, result: RefinerResult) -> str:
     """把 RefinerResult 渲染成可读 Markdown。"""
-    status_text = "证据充分" if result.final_status == FinalStatus.SUFFICIENT else "有限证据（部分方面无法完全确认）"
+    if result.final_status == FinalStatus.SUFFICIENT:
+        status_text = "证据充分"
+    elif result.final_status == FinalStatus.UNREVIEWED:
+        status_text = "未经过 Reviewer（直接编排消融）"
+    else:
+        status_text = "有限证据（部分方面无法完全确认）"
     lines = [
         f"# 合同审查结论：{question}",
         "",

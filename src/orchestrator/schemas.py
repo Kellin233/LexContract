@@ -19,6 +19,7 @@ __all__ = [
     "AgentResult",
     "ResearchReport",
     "RunConfig",
+    "OrchestrationMode",
 ]
 
 
@@ -61,6 +62,13 @@ class AgentStatus(Enum):
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
+
+
+class OrchestrationMode(str, Enum):
+    """合同证据链的编排模式。"""
+
+    DIRECT = "direct"
+    REVIEWED_INCREMENTAL = "reviewed_incremental"
 
 
 # ============================================================================
@@ -126,6 +134,7 @@ class ResearchReport:
         num_replan: 重规划次数。
         final_score: 最终综合评分（由外部评测模块写入）。
         structured: 合同证据链流程的结构化结果（RefinerResult 的 JSON 字典）。
+        telemetry: 本次编排、检索、校验和引用审计的结构化遥测。
     """
     query: str
     content: str
@@ -135,6 +144,7 @@ class ResearchReport:
     num_replan: int = 0
     final_score: float = 0.0
     structured: dict = field(default_factory=dict)
+    telemetry: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -152,6 +162,7 @@ class RunConfig:
         max_iterations: 合同证据链流最大研究轮数（Planner→Worker→Reviewer 一圈为 1）。
         enable_evidence_verification: 是否启用 CitationVerifier 原文校验。
         stop_on_no_effective_new_evidence: 无有效新增证据时是否提前停止。
+        orchestration_mode: direct 或 reviewed_incremental。
     """
     max_concurrent: int = 5
     global_timeout_seconds: int = 600
@@ -163,3 +174,4 @@ class RunConfig:
     max_iterations: int = 3
     enable_evidence_verification: bool = True
     stop_on_no_effective_new_evidence: bool = True
+    orchestration_mode: str = OrchestrationMode.REVIEWED_INCREMENTAL.value

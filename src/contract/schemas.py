@@ -26,9 +26,10 @@ class ReviewStatus(str, Enum):
 
 
 class FinalStatus(str, Enum):
-    """最终研究状态：SUFFICIENT=证据足够；PARTIALLY_SUFFICIENT=达上限/无有效新增，仍进 Refiner。"""
+    """最终研究状态：证据充分、部分充分，或 direct 消融中跳过 Reviewer。"""
     SUFFICIENT = "SUFFICIENT"
     PARTIALLY_SUFFICIENT = "PARTIALLY_SUFFICIENT"
+    UNREVIEWED = "UNREVIEWED"
 
 
 class Evidence(BaseModel):
@@ -76,6 +77,11 @@ class WorkerResult(BaseModel):
         default_factory=dict,
         description="候选转证据时的丢弃原因计数（materialize-fail 或 verify_note 类名），供评测观测",
     )
+    candidate_count: int = Field(default=0, description="Searcher 最终输出中收到的候选证据数量")
+    materialize_failed_count: int = Field(default=0, description="候选无法物化为 Evidence 的数量")
+    verifier_rejected_count: int = Field(default=0, description="CitationVerifier 拦截的非法证据数量")
+    verified_evidence_count: int = Field(default=0, description="通过 CitationVerifier 的候选数量")
+    search_tool_call_count: int = Field(default=0, description="实际执行的 search/grep Tool Call 数")
 
 
 class MissingAspect(BaseModel):
@@ -133,6 +139,7 @@ class RefinerResult(BaseModel):
     final_status: FinalStatus = FinalStatus.PARTIALLY_SUFFICIENT
     # 保留行文原文（含 [E###] 引用占位），便于人读与调试
     markdown_body: str = Field(default="")
+    citation_audit: dict = Field(default_factory=dict, description="引用 ID 与原文映射审计结果")
 
 
 class ResearchState(BaseModel):
