@@ -16,7 +16,7 @@
 
 LexTrace 是一个面向合同 / 法律文档的证据链式研究系统：针对一个问题，多个研究 Agent 只负责从合同库里收集"可引用的原始条款证据"，由唯一的结论 Agent 基于证据生成带引用、可回查、不编造的审查报告。
 
-核心流程不是"检索 → 中间总结 → 再总结 → 最终答案"，而是 `direct` 模式下的：
+LexTrace 提供 `direct` 与 `reviewed_incremental` 两种编排模式。`direct` 模式的核心流程如下：
 
 ```
 问题
@@ -34,13 +34,13 @@ EvidenceStore 去重登记（按 document_id + start/end 偏移），只按 ID �
 Refiner 读取已校验证据，生成结论（唯一结论 Agent，JSON + Markdown）
 ```
 
-默认配置使用 `reviewed_incremental`：在 `COLLECTING` 后增加 Reviewer，并在发现缺口时增量规划、补派 Searcher；`direct` 需要在配置或评测命令中显式指定。本文的 Agent 编排部分先说明 `direct` 主链路。
+默认配置使用 `reviewed_incremental`：完成初始检索后，由 Reviewer 评估证据覆盖度、冲突与缺口，并按需增量规划和补派 Searcher；`direct` 模式则直接基于已校验证据生成报告。
 
 贯穿全代码的硬约束：
 
 1. **证据 = 原文，永不改写、永不压缩丢失**：`Evidence.quote` 是从数据库 `documents.full_text[start:end]` 截取的**连续原文**，禁止模型改写；
 2. **引用只许用证据 ID**：结论正文只用 `[E001]` 标注，由后处理把 E### 映射成《文档》章节 + 页码，杜绝模型自编条款号；
-3. **分层职责**：Planner 只定义调查目标，Searcher 只找证据，Refiner 是唯一生成结论的 Agent；`direct` 主链路不调用 Reviewer，中间层一律不产出推理性结论，降低错误在 Agent 间传播的风险；
+3. **分层职责**：Planner 定义调查目标，Searcher 收集证据，Reviewer 评估证据完整性，Refiner 生成最终结论；各层职责清晰，降低错误在 Agent 间传播的风险；
 4. **原文随时可取回**：证据带 `evidence_id + section_path + charspan`，全文在库里，凭 ID 即回查。
 
 ---
@@ -49,27 +49,26 @@ Refiner 读取已校验证据，生成结论（唯一结论 Agent，JSON + Markd
 
 **Agent 编排**
 
-以下按 `direct` 模式说明。流程由 `src/orchestrator/orchestrator.py` 中的有限状态机驱动：
+流程由 `src/orchestrator/orchestrator.py` 中的有限状态机驱动：
 
-`IDLE → PLANNING → DISPATCHING → COLLECTING → REFINING → DONE / FAILED`
+`IDLE → PLANNING → DISPATCHING → COLLECTING → REVIEWING → REFINING → DONE / FAILED`
 
-`reviewed_incremental` 在 `COLLECTING` 后进入 `REVIEWING`，必要时经过 `INCREMENTAL_PLANNING` 再次派发 Searcher，最后进入 `REFINING`。
+在 `reviewed_incremental` 模式下，Reviewer 发现证据缺口时会进入 `INCREMENTAL_PLANNING`，补充调查要点并再次派发 Searcher；`direct` 模式在完成证据收集后直接进入 `REFINING`。
 
-- **direct 分支**（`src/orchestrator/orchestrator.py`）：`COLLECTING` 完成后直接进入 `REFINING`，设置 `final_status=UNREVIEWED`、`stop_reason=direct_after_search`；本次运行不调用 Reviewer，也不执行 `incremental_plan`。
-- **Planner**（`src/contract/planner.py`）：direct 只调用一次 `initial_plan`，把原问题拆成最多 3 个调查要点（只定义"查什么"，不含任何中间结论）。
+- **Planner**（`src/contract/planner.py`）：把原问题拆成最多 3 个调查要点，只定义"查什么"，不生成中间结论；增量模式下根据 Reviewer 的缺口补充调查要点。
 - **Searcher**（`src/contract/worker.py`）：每个调查要点对应一个 Searcher 子任务，多轮工具循环收集证据，最终只输出 `WorkerResult`（仅证据）。Searcher 实例由 `AgentPool` 对象池管理：延迟创建、空闲复用、超时 / 异常降级重建、被上下文截断的 policy 直接丢弃。
 - **并行派发**：调查要点之间互相独立，按 DAG 分层用 `asyncio.Semaphore` 限流并发（默认 `contract.max_concurrent=3`），单子任务超时 300 秒；任一环节触发全局超时（默认 900 秒）会强制进入 Refiner，用已有证据收尾。
-- **Reviewer（可选）**（`src/contract/reviewer.py`）：仅在 `reviewed_incremental` 模式启用，评估证据覆盖度、明显冲突和缺口，并决定是否增量补查；direct 不进入该状态。
-- **Refiner**（`src/contract/refiner.py`）：唯一的结论 Agent，读取 `EvidenceStore` 中的全部已校验证据，输出结构化 `RefinerResult`（`conclusion / points / supporting_evidence_ids / citations / evidence_gap / final_status`）并渲染 Markdown。direct 下按 `UNREVIEWED` 状态提示模型直接评估已检索证据；证据不足时仍需如实写入 `evidence_gap`，不编造。
+- **Reviewer**（`src/contract/reviewer.py`）：评估证据覆盖度、明显冲突和缺口，为增量检索提供补查依据。
+- **Refiner**（`src/contract/refiner.py`）：读取 `EvidenceStore` 中的全部已校验证据，输出结构化 `RefinerResult`（`conclusion / points / supporting_evidence_ids / citations / evidence_gap / final_status`）并渲染 Markdown；证据不足时如实写入 `evidence_gap`。
 - **并发隔离**：评测等场景下每条实例拥有独立的 toolkit / agent_pool / orchestrator（共享 policy / planner / reviewer / refiner），避免 `toolkit.set_scope` 在并发实例间互相覆盖文档作用域。
 
 **上下文管理**
 
-系统**不做语义级文本压缩**（证据必须保留原文），改用分层手段控制上下文：
+系统以证据原文保真为优先，采用分层手段管理上下文：
 
 - **统一 token 口径**（`src/utils/tokens.py`）：`estimate_tokens` 估算文本 token（中文按 0.6 token/字、其余按空白分词 1 token），消息级 `estimate_messages_tokens` 另计每条消息 4 token 固定开销；全项目上下文 / 预算计算统一走该口径。
-- **窗口兜底**（`src/models/vllm_policy.py`）：`VLLMPolicy.max_context_tokens` 默认 128K，可被 `model.context_window_tokens` 按后端覆盖（deepseek 128000 / mimo 32000）。超阈值时**丢旧轮次**而非截断内容——保留 system 与最近交互，且不拆开 `assistant(tool_calls)` 与紧随的 `tool` 消息；极端情况才对最新一条做内容级截断并打 `[CONTENT_TRUNCATED]` 标记。被截断的 policy 会被对象池丢弃、不再复用。
-- **按需构造输入**：direct 下 Planner 只接收原始问题，Refiner 是唯一全量读取证据原文的环节；`reviewed_incremental` 额外向 Reviewer / 增量 Planner 传递精简的证据 ID、覆盖情况和缺口。Refiner 输入预算默认 65536 token（`contract.refiner_input_token_budget`），超预算只告警并记入报告的 `evidence_gap`，暂不裁剪。
+- **窗口管理**（`src/models/vllm_policy.py`）：`VLLMPolicy.max_context_tokens` 默认 128K，可被 `model.context_window_tokens` 按后端覆盖（deepseek 128000 / mimo 32000）；优先保留 system 消息和最近交互，完整保留工具调用链，极端情况下对最新内容做边界截断并标记 `[CONTENT_TRUNCATED]`。
+- **按需构造输入**：Planner 接收问题与调查目标，Reviewer / 增量 Planner 接收证据 ID、覆盖情况和缺口，Refiner 读取完整证据原文。Refiner 输入预算默认 65536 token（`contract.refiner_input_token_budget`），超预算会记录到报告的 `evidence_gap`。
 - **检索预算**：`search / grep` 两个检索类工具共用同一预算（默认 3 轮 × 每轮 1 个检索调用），预算直接写进 Searcher 系统提示词，改配置即改提示词；`get_*` 展馆工具与最终 JSON 不计入。
 - **工具结果去重**：同一 Searcher 多轮内，同一切片 / 同一章节的完整原文只注入一次，重复项正文替换为短标记（保留 id / 偏移 / 得分骨架），可开关做 A/B（`contract.searcher_dedup_tool_results`）。
 - **轮间只传 E###**：`EvidenceStore` 按跨度去重后只传证据 ID，要读正文时按 ID 从库里取出，避免全量字节在 Agent 间流转。
@@ -92,7 +91,7 @@ Refiner 读取已校验证据，生成结论（唯一结论 Agent，JSON + Markd
 - **校验**：`CitationVerifier` 纯程序化逐字符比对 `quote == full_text[start:end]`，并逐个检查 source chunk 的文档 / 章节归属、`charspan` 合法性及 `chunk.text == full_text[charspan]`；切片并集对证据区间覆盖率需 ≥98%、两端落在并集内（±1 字符容差）。失败即丢弃并计入 `drop_reasons`，不依赖 LLM 判断。（"零空洞"连续性校验在装配器的整章超限回退路径上。）
 - **去重与注册**：`EvidenceStore` 按 `(document_id, start, end)` 去重，为每条证据分配 `E###` 运行期 ID。
 - **引用**：Refiner 正文只用 `[E###]` 占位，后处理由证据元数据生成 `citations`（《文档》章节 + 页码），杜绝模型自编条款号；`supporting_evidence_ids` 只落最支撑最终结论的证据子集。
-- **缺口**：direct 的 `UNREVIEWED` 只表示跳过 Reviewer，不表示证据充分；无法确认的项仍如实写入 `evidence_gap`。`reviewed_incremental` 在达轮数上限或无有效新增时使用 `PARTIALLY_SUFFICIENT` 收尾，并在结论中明确标注缺口。
+- **缺口管理**：系统将无法确认的事项写入 `evidence_gap`；`reviewed_incremental` 在达到研究轮数上限或证据增量不足时，以 `PARTIALLY_SUFFICIENT` 状态生成结论，并在报告中明确标注缺口。
 
 ---
 
@@ -108,7 +107,7 @@ Refiner 读取已校验证据，生成结论（唯一结论 Agent，JSON + Markd
 | `src/contract/eval/` | 评测子系统（LegalBenchRAG / ContractNLI，见"评测"） |
 | `src/utils/` | `.env` 加载、token 口径、对话留档、LangSmith 追踪 |
 
-> 主链路只依赖上表中的模块。当前合同流程不包含对抗审查阶段；旧 deep-research 的 `adversarial / evolution / compressor / tools`、通用 Researcher / Summarizer、旧 Planner / Judge / 消融模块均已移除；`src/agents/` 仅保留合同 Searcher 依赖的基础 Agent 协议。当前没有跨 run 的 SQLite 记忆持久化，报告通过 CLI 显式保存为 Markdown / JSON。
+> 上述模块共同构成 LexTrace 的合同证据链：文档解析与入库提供数据基础，检索模块返回候选条款，编排层组织 Agent 协作，证据模块负责原文装配与校验，评测模块提供可复现的质量分析。
 
 ---
 
@@ -139,7 +138,7 @@ python -m src.retrieval.main init-db
 # 解析并把合同入库（含全文 + 向量；有 pg_search 时回填 BM25 tokens）
 python -m src.document.main parse <合同文件或目录>
 
-# 旧库升级：恢复 full_text、修复可证明的旧 charspan，并回填 search_tokens
+# 同步文档全文、切片区间与检索索引
 python -m src.document.main migrate
 
 # 把文档分派到会话（检索强制要求 session 作用域）
@@ -155,7 +154,7 @@ python scripts/run_single.py --query "乙方逾期交付货物，需要承担什
 ```
 
 输出 `outputs/reports/report_*.md`（可读报告）+ `report_*.json`（结构化 RefinerResult）+ 同目录 `run_*.log`。
-`run_repl.py` 可在单个进程内连续提问，但只复用当前进程的 Orchestrator，不写入跨 run 记忆：
+`run_repl.py` 支持在单个进程内连续提问并复用当前 Orchestrator：
 
 ```bash
 python scripts/run_repl.py --session_id S1
@@ -205,7 +204,7 @@ python tests/scope_and_db_check.py
 **评测设计**
 
 - **LegalBenchRAG**（`contractnli / cuad / maud / privacy_qa`）：每条 query 跑完整 LLM Searcher（多轮检索收集完整条款），指标为文档层 `agent_doc_precision / agent_doc_recall`（证据命中的 gold 相关文档占比 / 覆盖比例）＋ 字符层 `agent_span_precision / agent_span_recall / agent_span_f1`（证据对 gold 字符区间的重叠，官方区间口径）。
-- **ContractNLI**（端到端分类）：每条实例把 hypothesis 当研究问题、作用域锁到该合同，按 `contract.orchestration_mode` 运行编排；`direct` 为 Planner → Searcher → Refiner，`reviewed_incremental` 额外经过 Reviewer 和增量补查。评测给 Refiner 切换 3 选 1 标签专用提示词（`entailment / contradiction / neutral`），从 `conclusion` 字段提取分类结果；正式生产链路不注入该提示词。输出 Accuracy / weighted F1 / per-class F1。实例间可并发（默认 2）。
+- **ContractNLI**（端到端分类）：每条实例把 hypothesis 当研究问题、作用域锁到该合同，按 `contract.orchestration_mode` 运行编排；`direct` 为 Planner → Searcher → Refiner，`reviewed_incremental` 经过 Reviewer 和增量补查。评测使用三分类提示词（`entailment / contradiction / neutral`），从 `conclusion` 字段提取结果，输出 Accuracy / weighted F1 / per-class F1；实例间可并发（默认 2）。
 
 **证据与编排遥测**
 
@@ -261,17 +260,6 @@ python -m src.contract.eval.main --mode legalbenchrag --request-set configs/eval
 **检索预算 A/B（同一 5 条任务，并发 2）**：`3 轮 × 1 问` 与 `1 轮 × 3 问` 预测完全一致（Acc 0.80 / F1 0.72）；`1 轮 × 3 问` 墙钟更快（223s vs 308s，-27%）但 Searcher token 更多（145.6k vs 100.7k，+45%）。默认取 `3 轮 × 1 问` 以省 token。
 
 **解读**：文档级命中率显著高于字符级精度——Searcher 找对文档 / 条款的能力强（cuad 0.93、privacy_qa 1.00），而 span 精度低是设计使然：证据恢复的是**完整条款**，比 gold 标注的精确子区间更宽（召回高、精度低）。这是"证据 = 完整原文、禁止截断改写"这一硬约束的直接体现。
-
----
-
-## 🗺️ Roadmap
-
-- [x] 合同证据链主流程 + 断点式评测体系
-- [x] 多后端 LLM 路由（DeepSeek / MiMo / vLLM / OpenAI）
-- [x] 规划 / 检索配额与上下文预算治理
-- [ ] **证据板（Evidence Board）**：把进入 Agent 上下文的证据统一为干净的 JSON（`evidence_id / doc / section / page / quote` 等少数字段，去掉调试打分字段），Reviewer / Refiner 读同一块板，超预算时按 `supporting_evidence_ids` 分层显示并凭 ID 回查
-- [ ] 跨 run 记忆复用（基于已核实条款结论，接 PostgreSQL，统一 bge-m3 向量）
-- [ ] Web UI
 
 ---
 
